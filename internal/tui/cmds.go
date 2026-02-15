@@ -666,6 +666,7 @@ func makeRepoWorkflowRuns(resp api.RestWorkflowRunsResponse) []data.WorkflowRun 
 			Branch:    r.HeadBranch,
 			Bucket:    bucket,
 			StartedAt: r.RunStartedAt,
+			UpdatedAt: r.UpdatedAt,
 			RunNumber: r.RunNumber,
 		})
 	}

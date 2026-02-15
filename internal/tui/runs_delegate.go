@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
@@ -34,14 +35,41 @@ func (i *runItem) Title() string {
 
 // Description implements /charm.land/bubbles.list.DefaultItem.Description
 func (i *runItem) Description() string {
+	desc := ""
 	if i.run.Event == "" {
 		if i.run.Workflow == "" {
-			return "status check"
+			desc = "status check"
+		} else {
+			desc = i.run.Workflow
 		}
-		return i.run.Workflow
+	} else {
+		desc = fmt.Sprintf("on: %s", i.run.Event)
 	}
 
-	return fmt.Sprintf("on: %s", i.run.Event)
+	if dur := i.runDuration(); dur != "" {
+		desc += " · " + dur
+	}
+
+	return desc
+}
+
+func (i *runItem) runDuration() string {
+	if i.run.StartedAt.IsZero() {
+		return ""
+	}
+	var d time.Duration
+	if !i.run.UpdatedAt.IsZero() && !i.IsInProgress() {
+		d = i.run.UpdatedAt.Sub(i.run.StartedAt)
+	} else {
+		d = time.Since(i.run.StartedAt)
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
 // FilterValue implements /charm.land/bubbles.list.Item.FilterValue

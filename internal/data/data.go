@@ -20,6 +20,7 @@ type WorkflowRun struct {
 	Jobs      []WorkflowJob
 	Bucket    CheckBucket
 	StartedAt time.Time
+	UpdatedAt time.Time
 	RunNumber int
 }
 

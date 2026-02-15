@@ -1626,11 +1626,14 @@ func (m *model) onJobChanged() []tea.Cmd {
 	cmds = append(cmds, m.logsSpinner.Tick, m.inProgressSpinner.Tick)
 
 	currJob := m.getSelectedJobItem()
-	if currJob != nil && !currJob.initiatedLogsFetch && !currJob.isStatusInProgress() {
+	if currJob == nil {
+		// No job selected yet — expected when navigating to a run whose jobs
+		// are still loading (repo mode fetches jobs lazily per-run).
+		return cmds
+	}
+	if !currJob.initiatedLogsFetch && !currJob.isStatusInProgress() {
 		log.Debug("onJobChanged - fetching logs", "currJob", currJob)
 		cmds = append(cmds, m.makeFetchJobLogsCmd())
-	} else if currJob == nil {
-		log.Error("job changed but current job is nil")
 	}
 
 	cmds = append(cmds, m.renderJobLogs())
