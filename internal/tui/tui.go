@@ -332,9 +332,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ri != nil {
 			ri.loading = false
 			ri.run.Jobs = msg.jobs
+			selectedJob := m.getSelectedJobItem()
 			jobs := make([]*jobItem, 0)
 			for _, job := range msg.jobs {
 				nji := NewJobItem(job, m.styles)
+				isSelected := selectedJob != nil && selectedJob.job.Id == nji.job.Id
+				cmds = append(cmds, m.enrichJobItemWithSteps(&nji, job.Steps, job.Link, isSelected)...)
 				cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
 				jobs = append(jobs, &nji)
 			}
@@ -1491,6 +1494,23 @@ func (m *model) isScrollbarVisible() bool {
 	return m.logsViewport.TotalLineCount() > m.logsViewport.VisibleLineCount()
 }
 
+// enrichJobItemWithSteps converts raw API steps into stepItems on a jobItem.
+// Used by both PR mode (GraphQL) and repo mode (REST) after steps are available.
+func (m *model) enrichJobItemWithSteps(ji *jobItem, steps []api.Step, jobUrl string, tickIfSelected bool) []tea.Cmd {
+	cmds := make([]tea.Cmd, 0)
+	stepItems := make([]*stepItem, 0, len(steps))
+	for _, step := range steps {
+		si := NewStepItem(step, jobUrl, m.styles)
+		if tickIfSelected {
+			cmds = append(cmds, si.Tick())
+		}
+		stepItems = append(stepItems, &si)
+	}
+	ji.steps = stepItems
+	ji.loadingSteps = false
+	return cmds
+}
+
 func (m *model) enrichRunWithJobsStepsV2(msg workflowRunStepsFetchedMsg) []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	jobsMap := make(map[string]api.CheckRunWithSteps)
@@ -1508,23 +1528,14 @@ func (m *model) enrichRunWithJobsStepsV2(msg workflowRunStepsFetchedMsg) []tea.C
 	selectedJob := m.getSelectedJobItem()
 	ri.loading = false
 	for jIdx, ji := range ri.jobsItems {
-		ri.jobsItems[jIdx].loadingSteps = false
 		jobWithSteps, ok := jobsMap[ji.job.Id]
 		if !ok {
+			ri.jobsItems[jIdx].loadingSteps = false
 			continue
 		}
 
-		steps := make([]*stepItem, 0)
-		for _, step := range jobWithSteps.Steps.Nodes {
-			si := NewStepItem(step, jobWithSteps.Url, m.styles)
-			if selectedJob != nil && selectedJob.job.Id == ji.job.Id {
-				cmds = append(cmds, si.Tick())
-			}
-
-			steps = append(steps, &si)
-		}
-
-		ri.jobsItems[jIdx].steps = steps
+		isSelected := selectedJob != nil && selectedJob.job.Id == ji.job.Id
+		cmds = append(cmds, m.enrichJobItemWithSteps(ri.jobsItems[jIdx], jobWithSteps.Steps.Nodes, jobWithSteps.Url, isSelected)...)
 	}
 
 	return cmds
@@ -1759,16 +1770,6 @@ func (m *model) getRunItemById(runId string) *runItem {
 	for _, run := range m.runsList.Items() {
 		ri := run.(*runItem)
 		if ri.run.Id == runId {
-			return ri
-		}
-	}
-	return nil
-}
-
-func (m *model) getRunItemByName(runName string) *runItem {
-	for _, run := range m.runsList.Items() {
-		ri := run.(*runItem)
-		if ri.run.Name == runName {
 			return ri
 		}
 	}
@@ -2080,7 +2081,7 @@ func (m *model) buildFlatChecksLists() []tea.Cmd {
 func (m *model) buildHierachicalChecksLists() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	for i, run := range m.workflowRuns {
-		ri := m.getRunItemByName(run.Name)
+		ri := m.getRunItemById(run.Id)
 		if ri == nil {
 			nr := NewRunItem(run, m.styles)
 			ri = &nr
