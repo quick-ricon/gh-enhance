@@ -45,13 +45,23 @@ const (
 	PaneLogs
 )
 
+// ViewMode determines whether the TUI is showing PR checks or repo-level workflow runs.
+type ViewMode int
+
+const (
+	ModePR   ViewMode = iota
+	ModeRepo
+)
+
 type model struct {
 	width             int
 	height            int
+	mode              ViewMode
 	prNumber          string
 	repo              string
 	pr                api.PR
 	prWithChecks      api.PRWithChecks
+	repoRunsFilter    api.RepoRunsFilter
 	workflowRuns      []data.WorkflowRun
 	runsList          list.Model
 	jobsList          list.Model
@@ -81,7 +91,9 @@ type model struct {
 }
 
 type ModelOpts struct {
-	Flat bool
+	Flat           bool
+	Mode           ViewMode
+	RepoRunsFilter api.RepoRunsFilter
 }
 
 func NewModel(repo string, number string, opts ModelOpts) model {
@@ -185,8 +197,10 @@ func NewModel(repo string, number string, opts ModelOpts) model {
 		runsList:          runsList,
 		stepsList:         stepsList,
 		checksList:        checksList,
+		mode:              opts.Mode,
 		prNumber:          number,
 		repo:              repo,
+		repoRunsFilter:    opts.RepoRunsFilter,
 		runsDelegate:      runsDelegate,
 		jobsDelegate:      jobsDelegate,
 		stepsDelegate:     stepsDelegate,
@@ -209,6 +223,9 @@ func NewModel(repo string, number string, opts ModelOpts) model {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.mode == ModeRepo {
+		return m.makeInitRepoCmd()
+	}
 	return m.makeInitCmd()
 }
 
@@ -230,7 +247,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// `m.fetchPRChecksWithInterval` needs an up to date model, so this *cannot* be called
 	// at the `m.makeInitCmd`. The up to date model is received by this `Update` func.
 	case startIntervalFetching:
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case prFetchedMsg:
 		m.pr = msg.pr
@@ -288,6 +309,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Sequence(msgCmd, tea.Quit)
 		}
 
+	case repoRunsFetchedMsg:
+		if msg.err != nil {
+			log.Debug("error when fetching repo workflow runs", "err", msg.err)
+			m.err = msg.err
+			msgCmd := tea.Printf("%s\nrepo=%s\nOriginal error: %v\n",
+				lipgloss.NewStyle().Foreground(m.styles.colors.errorColor).Bold(true).Render(
+					"❌ Failed to fetch workflow runs."), m.repo, msg.err)
+			return m, tea.Sequence(msgCmd, tea.Quit)
+		}
+		m.workflowRuns = msg.runs
+		m.lastFetched = time.Now()
+		m.stopSpinners()
+		cmds = append(cmds, m.onWorkflowRunsFetched()...)
+
+	case repoRunJobsFetchedMsg:
+		if msg.err != nil {
+			log.Error("error fetching run jobs", "runId", msg.runId, "err", msg.err)
+			break
+		}
+		ri := m.getRunItemById(msg.runId)
+		if ri != nil {
+			ri.loading = false
+			ri.run.Jobs = msg.jobs
+			jobs := make([]*jobItem, 0)
+			for _, job := range msg.jobs {
+				nji := NewJobItem(job, m.styles)
+				cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
+				jobs = append(jobs, &nji)
+			}
+			ri.jobsItems = jobs
+			cmds = append(cmds, m.updateLists()...)
+			cmds = append(cmds, m.onJobChanged()...)
+		}
+
 	case workflowRunStepsFetchedMsg:
 		cmds = append(cmds, m.enrichRunWithJobsStepsV2(msg)...)
 		cmds = append(cmds, m.updateLists()...)
@@ -338,7 +393,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.lastFetched = time.Now()
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case reRunRunMsg:
 		if msg.err != nil {
@@ -350,7 +409,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.lastFetched = time.Now()
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case tea.WindowSizeMsg:
 		log.Info("window size changed", "width", msg.Width, "height", msg.Height)
@@ -394,7 +457,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if key.Matches(msg, modeKey) {
+		if key.Matches(msg, modeKey) && m.mode != ModeRepo {
 			m.flat = !m.flat
 			if m.flat {
 				m.focusedPane = PaneChecks
@@ -419,7 +482,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if key.Matches(msg, refreshAllKey) {
-			newModel := NewModel(m.repo, m.prNumber, ModelOpts{})
+			newModel := NewModel(m.repo, m.prNumber, ModelOpts{
+				Mode:           m.mode,
+				RepoRunsFilter: m.repoRunsFilter,
+			})
 			newModel.flat = m.flat
 			newModel.width = m.width
 			newModel.height = m.height
@@ -429,7 +495,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newModel.setFocusedPaneStyles()
 
 			m.lastFetched = time.Now()
-			return newModel, newModel.makeInitCmd()
+			return newModel, newModel.Init()
 		}
 
 		if key.Matches(msg, rerunKey) {
@@ -462,8 +528,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.logsInput.Focus())
 		}
 
-		if key.Matches(msg, openPRKey) && m.prWithChecks.Url != "" {
-			cmds = append(cmds, makeOpenUrlCmd(m.prWithChecks.Url))
+		if key.Matches(msg, openPRKey) {
+			if m.mode == ModeRepo {
+				cmds = append(cmds, makeOpenUrlCmd(
+					fmt.Sprintf("https://github.com/%s/actions", m.repo)))
+			} else if m.prWithChecks.Url != "" {
+				cmds = append(cmds, makeOpenUrlCmd(m.prWithChecks.Url))
+			}
 		}
 
 		if key.Matches(msg, nextPaneKey) {
@@ -782,6 +853,16 @@ func (m *model) viewHeader() string {
 				m.styles.faintFgStyle.Render(version),
 			)))
 
+	if m.mode == ModeRepo {
+		titleWidth := m.width - logoWidth - m.styles.headerStyle.GetHorizontalFrameSize()
+		title := bgStyle.Width(titleWidth).Render(lipgloss.JoinVertical(lipgloss.Left,
+			bgStyle.Foreground(m.styles.colors.darkColor).Bold(true).Render(m.repo),
+			bgStyle.Foreground(m.styles.colors.faintColor).Render("Workflow Runs"),
+		))
+		return m.styles.headerStyle.Width(m.width).Render(
+			lipgloss.JoinHorizontal(lipgloss.Left, bgStyle.Render(title), logo))
+	}
+
 	status := bgStyle.Render(m.viewCommitStatus(bgStyle))
 	prWidth := m.width - lipgloss.Width(status) - logoWidth -
 		m.styles.headerStyle.GetHorizontalFrameSize()
@@ -834,6 +915,10 @@ func (m *model) viewFooter() string {
 	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
 	sFooter := m.styles.footerStyle.Width(m.width)
 
+	if m.mode == ModeRepo {
+		return m.viewRepoFooter()
+	}
+
 	if m.width == 0 || len(m.prWithChecks.Commits.Nodes) == 0 {
 		return sFooter.Inherit(bg).Render("")
 	}
@@ -867,7 +952,7 @@ func (m *model) viewFooter() string {
 			fmt.Sprintf("%d skipped", stats.Skipped)))
 	}
 
-	checks := bg.Render(strings.Join(texts, bg.Render(", ")))
+	checksView := bg.Render(strings.Join(texts, bg.Render(", ")))
 
 	reFetchingIn := ""
 	if m.prWithChecks.Number != 0 && m.prWithChecks.IsStatusCheckInProgress() {
@@ -879,15 +964,95 @@ func (m *model) viewFooter() string {
 		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(fmt.Sprintf("refreshing %s", untilStr))
 	}
 
-	help := m.styles.helpButtonStyle.Render("? help")
+	helpView := m.styles.helpButtonStyle.Render("? help")
 
 	gap := bg.Render(
-		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(checks)-
-			lipgloss.Width(reFetchingIn)-lipgloss.Width(help)-
+		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(checksView)-
+			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
 			m.styles.footerStyle.GetHorizontalFrameSize())))
 
 	return sFooter.Render(
-		lipgloss.JoinHorizontal(lipgloss.Top, totalText, checks, gap, reFetchingIn, help))
+		lipgloss.JoinHorizontal(lipgloss.Top, totalText, checksView, gap, reFetchingIn, helpView))
+}
+
+func (m *model) viewRepoFooter() string {
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	sFooter := m.styles.footerStyle.Width(m.width)
+
+	if m.width == 0 {
+		return sFooter.Inherit(bg).Render("")
+	}
+
+	var failing, inProgress, successful, skipped int
+	for _, run := range m.workflowRuns {
+		switch run.Bucket {
+		case data.CheckBucketFail:
+			failing++
+		case data.CheckBucketPending:
+			inProgress++
+		case data.CheckBucketPass:
+			successful++
+		case data.CheckBucketSkipping:
+			skipped++
+		}
+	}
+
+	total := len(m.workflowRuns)
+	totalText := ""
+	if total > 0 {
+		totalText = bg.Foreground(m.styles.colors.lightColor).Render(
+			fmt.Sprintf("%d runs: ", total))
+	}
+
+	texts := make([]string, 0)
+	if failing > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
+			fmt.Sprintf("%d failing", failing)))
+	}
+	if inProgress > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
+			fmt.Sprintf("%d in progress", inProgress)))
+	}
+	if successful > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
+			fmt.Sprintf("%d successful", successful)))
+	}
+	if skipped > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("%d skipped", skipped)))
+	}
+
+	runsView := bg.Render(strings.Join(texts, bg.Render(", ")))
+
+	reFetchingIn := ""
+	if m.hasInProgressRuns() {
+		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
+		untilStr := fmt.Sprintf("in %ds", int(until))
+		if until <= 0 {
+			untilStr = "now..."
+		}
+		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("refreshing %s", untilStr))
+	}
+
+	helpView := m.styles.helpButtonStyle.Render("? help")
+
+	gap := bg.Render(
+		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(runsView)-
+			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
+			m.styles.footerStyle.GetHorizontalFrameSize())))
+
+	return sFooter.Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, totalText, runsView, gap, reFetchingIn, helpView))
+}
+
+func (m *model) hasInProgressRuns() bool {
+	for _, run := range m.workflowRuns {
+		if run.Bucket == data.CheckBucketPending {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) shouldShowSteps() bool {
@@ -1421,7 +1586,11 @@ func (m *model) onRunChanged() []tea.Cmd {
 	}
 
 	if ri.loading {
-		cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+		} else {
+			cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+		}
 	}
 
 	cmds = append(cmds, m.updateLists()...)
@@ -1526,7 +1695,7 @@ func (m *model) renderJobLogs() tea.Cmd {
 }
 
 func (m *model) logsContentView() string {
-	if m.prWithChecks.Number != 0 && len(m.prWithChecks.Commits.Nodes) > 0 &&
+	if m.mode == ModePR && m.prWithChecks.Number != 0 && len(m.prWithChecks.Commits.Nodes) > 0 &&
 		m.prWithChecks.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.CheckRunCount == 0 {
 		return m.fullScreenMessageView(
 			lipgloss.JoinVertical(lipgloss.Center,
@@ -1855,7 +2024,11 @@ func (m *model) onWorkflowRunsFetched() []tea.Cmd {
 
 		if len(m.runsList.Items()) > 0 {
 			ri := m.runsList.SelectedItem().(*runItem)
-			cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+			if m.mode == ModeRepo {
+				cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+			} else {
+				cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+			}
 			if before == nil || before.run.Id != ri.run.Id {
 				cmds = append(cmds, m.onRunChanged()...)
 			}

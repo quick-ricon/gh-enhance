@@ -16,6 +16,7 @@ type WorkflowRun struct {
 	Link      string
 	Workflow  string
 	Event     string
+	Branch    string
 	Jobs      []WorkflowJob
 	Bucket    CheckBucket
 	StartedAt time.Time
