@@ -379,6 +379,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.enrichRunWithJobsStepsV2(msg)...)
 		cmds = append(cmds, m.updateLists()...)
 
+		// Now that steps are populated, apply auto-selection (in-progress or
+		// failed step). This is needed because onJobChanged may have fired
+		// before the async step fetch completed, finding no steps to select.
+		if ri := m.getRunItemById(msg.runId); ri != nil {
+			if selectedJob := m.getSelectedJobItem(); selectedJob != nil {
+				for _, ji := range ri.jobsItems {
+					if ji.job.Id == selectedJob.job.Id {
+						cmds = append(cmds, m.renderJobLogs())
+						m.goToErrorInLogs()
+						break
+					}
+				}
+			}
+		}
+
 	case checkStepsFetchedMsg:
 		m.enrichCheckWithSteps(msg)
 		cmds = append(cmds, m.updateLists()...)
@@ -2104,6 +2119,16 @@ func (m *model) goToErrorInLogs() {
 		if offset > 0 {
 			m.logsViewport.SetYOffset(offset)
 		}
+	} else if currJob.isStatusInProgress() {
+		// Select the first in-progress step, mirroring the failed-step behavior
+		for i, step := range m.stepsList.VisibleItems() {
+			if step.(*stepItem).IsInProgress() {
+				m.stepsList.Select(i)
+				break
+			}
+		}
+		m.setStepLogs()
+		m.logsViewport.GotoBottom()
 	} else {
 		m.logsViewport.GotoTop()
 	}
