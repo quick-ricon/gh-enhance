@@ -546,11 +546,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Block all pane navigation while in logs scroll mode.
 		// User must Escape first to exit scroll mode.
 		if !m.logsScrollMode {
-			if key.Matches(msg, nextPaneKey) {
+			enterNavigation := key.Matches(msg, enterScrollKey) && m.focusedPane != PaneLogs
+			if key.Matches(msg, nextPaneKey) || enterNavigation {
 				m.savePaneSelection()
 				m.focusedPane = m.nextPane()
 				m.zoomedPane = nil
 				m.setFocusedPaneStyles()
+				if enterNavigation {
+					return m, tea.Batch(cmds...)
+				}
 			}
 
 			if key.Matches(msg, prevPaneKey) {
@@ -1106,10 +1110,11 @@ func (m *model) viewLogs() string {
 	if m.focusedPane == PaneLogs {
 		if m.logsScrollMode {
 			title = "Job Logs (scroll)"
+			title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.warnColor)
 		} else {
 			title = "Job Logs · enter to scroll"
+			title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.focusedColor)
 		}
-		title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.focusedColor)
 		s := m.styles.focusedPaneTitleBarStyle.MarginBottom(0)
 		title = s.Render(title)
 	} else {
@@ -1765,7 +1770,7 @@ func (m *model) getStepLogRange(ji *jobItem) (int, int) {
 // setStepLogs filters the viewport to show only the selected step's logs.
 func (m *model) setStepLogs() {
 	ji := m.getSelectedJobItem()
-	if ji == nil || len(ji.renderedLogs) == 0 {
+	if ji == nil || len(ji.logs) == 0 {
 		return
 	}
 
@@ -1778,7 +1783,19 @@ func (m *model) setStepLogs() {
 				m.styles.faintFgStyle.Bold(true).Render("No logs for this step")))
 		return
 	}
-	m.logsViewport.SetContentLines(ji.renderedLogs[start:end])
+
+	// Find the baseline depth so step-scoped logs render flush-left.
+	stepLogs := ji.logs[start:end]
+	baselineDepth := 0
+	for _, log := range stepLogs {
+		if log.Kind == data.LogKindStepNone && log.Depth > 0 {
+			baselineDepth = log.Depth
+			break
+		}
+	}
+
+	rendered, _ := m.renderLogLines(stepLogs, baselineDepth)
+	m.logsViewport.SetContentLines(rendered)
 }
 
 func (m *model) onStepChanged() {
@@ -1937,18 +1954,16 @@ func (m *model) getJobItemById(jobId string) *jobItem {
 	return nil
 }
 
-func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
-	defer utils.TimeTrack(time.Now(), "rendering logs")
+func (m *model) renderLogLines(logs []data.LogsWithTime, depthOffset int) ([]string, []string) {
 	w := m.logsViewport.Width() - m.styles.scrollbarStyle.GetWidth()
 	expand := ExpandSymbol + " "
-	lines := make([]string, 0)
-	unstyledLines := make([]string, 0)
-	for i, log := range ji.logs {
+	lines := make([]string, 0, len(logs))
+	unstyledLines := make([]string, 0, len(logs))
+	for _, log := range logs {
 		rendered := log.Log
 		unstyled := ansi.Strip(log.Log)
 		switch log.Kind {
 		case data.LogKindError:
-			ji.errorLine = i
 			rendered = strings.Replace(rendered, parser.ErrorMarker, "", 1)
 			unstyled = rendered
 			rendered = m.styles.errorBgStyle.Width(w).Render(lipgloss.JoinHorizontal(lipgloss.Top,
@@ -1970,9 +1985,10 @@ func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
 		case data.LogKindStepNone:
 			sep := ""
 			unstyledSep := ""
-			if log.Depth > 0 {
+			adjDepth := log.Depth - depthOffset
+			if adjDepth > 0 {
 				dm := strings.Repeat(
-					fmt.Sprintf("%s  ", Separator), log.Depth)
+					fmt.Sprintf("%s  ", Separator), adjDepth)
 				unstyledSep = dm
 				sep = m.styles.separatorStyle.Render(dm)
 			}
@@ -1981,6 +1997,17 @@ func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
 		}
 		lines = append(lines, rendered)
 		unstyledLines = append(unstyledLines, unstyled)
+	}
+	return lines, unstyledLines
+}
+
+func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
+	defer utils.TimeTrack(time.Now(), "rendering logs")
+	lines, unstyledLines := m.renderLogLines(ji.logs, 0)
+	for i, log := range ji.logs {
+		if log.Kind == data.LogKindError {
+			ji.errorLine = i
+		}
 	}
 	return lines, unstyledLines
 }

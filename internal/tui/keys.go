@@ -114,7 +114,7 @@ var (
 	)
 
 	exitScrollKey = key.NewBinding(
-		key.WithKeys("esc"),
-		key.WithHelp("esc", "exit scroll"),
+		key.WithKeys("esc", "enter", "q"),
+		key.WithHelp("esc/enter/q", "exit scroll"),
 	)
 )
