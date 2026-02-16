@@ -1086,19 +1086,16 @@ func (m *model) hasInProgressRuns() bool {
 }
 
 func (m *model) shouldShowSteps() bool {
+	// In hierarchical mode, always show the steps pane to keep a stable layout.
+	if !m.flat {
+		return true
+	}
+
 	loadingSteps := false
-	if m.flat {
-		check := m.checksList.SelectedItem()
-		if check != nil {
-			ci := check.(*checkItem)
-			loadingSteps = ci.loadingSteps
-		}
-	} else {
-		job := m.jobsList.SelectedItem()
-		if job != nil {
-			ji := job.(*jobItem)
-			loadingSteps = ji.loadingSteps
-		}
+	check := m.checksList.SelectedItem()
+	if check != nil {
+		ci := check.(*checkItem)
+		loadingSteps = ci.loadingSteps
 	}
 
 	return loadingSteps || len(m.stepsList.VisibleItems()) > 0
@@ -2227,6 +2224,7 @@ func (m *model) resetStepsState() {
 	m.logsViewport.ClearHighlights()
 	m.numHighlights = 0
 	m.logsInput.Reset()
+	m.stepsList.SetItems(make([]list.Item, 0))
 	m.stepsList.ResetSelected()
 	m.stepsList.ResetFilter()
 }
