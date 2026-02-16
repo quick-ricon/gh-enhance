@@ -2104,6 +2104,16 @@ func (m *model) goToErrorInLogs() {
 		if offset > 0 {
 			m.logsViewport.SetYOffset(offset)
 		}
+	} else if currJob.isStatusInProgress() {
+		// Select the first in-progress step, mirroring the failed-step behavior
+		for i, step := range m.stepsList.VisibleItems() {
+			if step.(*stepItem).IsInProgress() {
+				m.stepsList.Select(i)
+				break
+			}
+		}
+		m.setStepLogs()
+		m.logsViewport.GotoBottom()
 	} else {
 		m.logsViewport.GotoTop()
 	}
