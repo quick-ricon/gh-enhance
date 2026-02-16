@@ -1716,7 +1716,7 @@ func (m *model) onStepChanged() {
 	step := m.stepsList.SelectedItem()
 	cursor := m.stepsList.Cursor()
 
-	if step == nil {
+	if ji == nil || step == nil {
 		return
 	}
 
@@ -2162,19 +2162,24 @@ func (m *model) buildHierachicalChecksLists() []tea.Cmd {
 		}
 		ri.run = &run
 
-		jobs := make([]*jobItem, 0)
-		for _, job := range run.Jobs {
-			ji := m.getJobItemById(job.Id)
-			if ji == nil {
-				nji := NewJobItem(job, m.styles)
-				cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
-				ji = &nji
+		// In repo mode, jobs are fetched separately per-run and stored on
+		// the runItem. Don't overwrite them with empty data from the runs
+		// list API (which never includes jobs).
+		if len(run.Jobs) > 0 {
+			jobs := make([]*jobItem, 0)
+			for _, job := range run.Jobs {
+				ji := m.getJobItemById(job.Id)
+				if ji == nil {
+					nji := NewJobItem(job, m.styles)
+					cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
+					ji = &nji
+				}
+				ji.job = &job
+				jobs = append(jobs, ji)
 			}
-			ji.job = &job
-			jobs = append(jobs, ji)
-		}
 
-		ri.jobsItems = jobs
+			ri.jobsItems = jobs
+		}
 	}
 	return cmds
 }

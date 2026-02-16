@@ -68,7 +68,7 @@ func (d *checksDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		log.Info("key pressed on check", "key", msg.Text)
+		log.Info("key pressed on check", "key", msg.String())
 		switch {
 		case key.Matches(msg, openUrlKey):
 			return makeOpenUrlCmd(selected.job.Link)

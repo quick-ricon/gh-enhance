@@ -110,7 +110,7 @@ func (d *jobsDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		log.Info("key pressed on job", "key", msg.Text)
+		log.Info("key pressed on job", "key", msg.String())
 		switch {
 		case key.Matches(msg, openUrlKey):
 			return makeOpenUrlCmd(job.job.Link)
