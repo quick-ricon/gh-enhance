@@ -18,6 +18,11 @@ var (
 		key.WithHelp("ctrl+c", "quit"),
 	)
 
+	backKey = key.NewBinding(
+		key.WithKeys("q"),
+		key.WithHelp("q", "back / quit"),
+	)
+
 	nextRowKey = key.NewBinding(
 		key.WithKeys("j", "down"),
 		key.WithHelp("j/↓", "next row"),

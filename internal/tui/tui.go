@@ -591,6 +591,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.zoomedPane = nil
 				m.setFocusedPaneStyles()
 			}
+
+			if key.Matches(msg, backKey) {
+				prev := m.previousPane()
+				if prev == m.focusedPane {
+					// Already at leftmost pane — quit.
+					return m, tea.Quit
+				}
+				m.savePaneSelection()
+				m.focusedPane = prev
+				m.zoomedPane = nil
+				m.setFocusedPaneStyles()
+			}
 		}
 
 	case spinner.TickMsg:
