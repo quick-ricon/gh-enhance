@@ -336,15 +336,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selectedJob := m.getSelectedJobItem()
 			jobs := make([]*jobItem, 0)
 			for _, job := range msg.jobs {
-				nji := NewJobItem(job, m.styles)
-				isSelected := selectedJob != nil && selectedJob.job.Id == nji.job.Id
-				cmds = append(cmds, m.enrichJobItemWithSteps(&nji, job.Steps, job.Link, isSelected)...)
-				cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
-				jobs = append(jobs, &nji)
+				ji := m.getJobItemById(job.Id)
+				if ji == nil {
+					nji := NewJobItem(job, m.styles)
+					ji = &nji
+					cmds = append(cmds, ji.Tick(), m.inProgressSpinner.Tick)
+				}
+				ji.job = &job
+				isSelected := selectedJob != nil && selectedJob.job.Id == ji.job.Id
+				cmds = append(cmds, m.enrichJobItemWithSteps(ji, job.Steps, job.Link, isSelected)...)
+				jobs = append(jobs, ji)
 			}
 			ri.jobsItems = jobs
 			cmds = append(cmds, m.updateLists()...)
-			cmds = append(cmds, m.onJobChanged()...)
+
+			// Restore job selection by ID and only reset if the job changed.
+			if selectedJob != nil {
+				for i, item := range m.jobsList.Items() {
+					if item.(*jobItem).job.Id == selectedJob.job.Id {
+						m.jobsList.Select(i)
+						break
+					}
+				}
+				newJob := m.getSelectedJobItem()
+				if newJob == nil || newJob.job.Id != selectedJob.job.Id {
+					cmds = append(cmds, m.onJobChanged()...)
+				}
+			} else {
+				cmds = append(cmds, m.onJobChanged()...)
+			}
 		}
 
 	case workflowRunStepsFetchedMsg:
@@ -2184,6 +2204,16 @@ func (m *model) onWorkflowRunsFetched() []tea.Cmd {
 		}
 
 		cmds = append(cmds, m.buildHierachicalChecksLists()...)
+
+		// Restore run selection by ID after list rebuild (InsertItem can shift cursor).
+		if before != nil {
+			for i, item := range m.runsList.Items() {
+				if item.(*runItem).run.Id == before.run.Id {
+					m.runsList.Select(i)
+					break
+				}
+			}
+		}
 
 		if len(m.runsList.Items()) > 0 {
 			ri := m.runsList.SelectedItem().(*runItem)

@@ -612,6 +612,9 @@ func (m *model) makeInitRepoCmd() tea.Cmd {
 
 func (m *model) startFetchingRepoRunsWithInterval() tea.Cmd {
 	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
+		if !m.hasInProgressRuns() {
+			return nil
+		}
 		return startIntervalFetching{}
 	})
 }
