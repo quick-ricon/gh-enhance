@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,6 +362,10 @@ func FetchJobSteps(repo string, jobID string) (NormalizedJobStepsResponse, error
 		return res, err
 	}
 
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
 	raw := jobStepsResponse{}
 	err = json.Unmarshal(body, &raw)
 	if err != nil {
@@ -427,6 +432,159 @@ func (pr *PRWithChecks) IsStatusCheckInProgress() bool {
 	stats := checks.AccumulatedStats(contexts.CheckRunCountsByState, contexts.StatusContextCountsByState)
 	return (pr.Commits.Nodes[0].Commit.StatusCheckRollup.State == "" ||
 		pr.Commits.Nodes[0].Commit.StatusCheckRollup.State == "PENDING" || stats.InProgress > 0)
+}
+
+// RepoRunsFilter specifies optional filters for listing repository workflow runs.
+type RepoRunsFilter struct {
+	Branch   string
+	Event    string
+	Status   string
+	Workflow string
+	PerPage  int
+	Page     int
+}
+
+type RestWorkflowRun struct {
+	Id           int       `json:"id"`
+	Name         string    `json:"name"`
+	Status       string    `json:"status"`
+	Conclusion   string    `json:"conclusion"`
+	HtmlUrl      string    `json:"html_url"`
+	Event        string    `json:"event"`
+	RunNumber    int       `json:"run_number"`
+	RunAttempt   int       `json:"run_attempt"`
+	HeadBranch   string    `json:"head_branch"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	RunStartedAt time.Time `json:"run_started_at"`
+	WorkflowId   int       `json:"workflow_id"`
+}
+
+type RestWorkflowRunsResponse struct {
+	TotalCount   int               `json:"total_count"`
+	WorkflowRuns []RestWorkflowRun `json:"workflow_runs"`
+}
+
+type RestWorkflowJob struct {
+	Id          int        `json:"id"`
+	RunId       int        `json:"run_id"`
+	Name        string     `json:"name"`
+	Status      string     `json:"status"`
+	Conclusion  string     `json:"conclusion"`
+	HtmlUrl     string     `json:"html_url"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt time.Time  `json:"completed_at"`
+	Steps       []httpStep `json:"steps"`
+}
+
+type RestWorkflowJobsResponse struct {
+	TotalCount int               `json:"total_count"`
+	Jobs       []RestWorkflowJob `json:"jobs"`
+}
+
+// FetchRepoWorkflowRuns lists workflow runs for a repository via the REST API.
+func FetchRepoWorkflowRuns(repo string, filter RepoRunsFilter) (RestWorkflowRunsResponse, error) {
+	res := RestWorkflowRunsResponse{}
+	c, err := getHTTPClient()
+	if err != nil {
+		return res, err
+	}
+
+	perPage := filter.PerPage
+	if perPage <= 0 {
+		perPage = 30
+	}
+
+	runsUrl, err := url.Parse(fmt.Sprintf("https://api.github.com/repos/%s/actions/runs", repo))
+	if err != nil {
+		return res, err
+	}
+
+	q := runsUrl.Query()
+	q.Set("per_page", fmt.Sprintf("%d", perPage))
+	if filter.Page > 0 {
+		q.Set("page", fmt.Sprintf("%d", filter.Page))
+	}
+	if filter.Branch != "" {
+		q.Set("branch", filter.Branch)
+	}
+	if filter.Event != "" {
+		q.Set("event", filter.Event)
+	}
+	if filter.Status != "" {
+		q.Set("status", filter.Status)
+	}
+	if filter.Workflow != "" {
+		q.Set("workflow_id", filter.Workflow)
+	}
+	runsUrl.RawQuery = q.Encode()
+
+	log.Debug("fetching repo workflow runs", "url", runsUrl)
+	startTime := time.Now()
+	resp, err := c.Get(runsUrl.String())
+	if err != nil {
+		return res, err
+	}
+	log.Debug("FetchRepoWorkflowRuns request completed", "duration", time.Since(startTime))
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return res, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	err = json.Unmarshal(body, &res)
+	if err != nil {
+		log.Error("error parsing workflow runs response", "err", err)
+		return res, err
+	}
+
+	return res, nil
+}
+
+// FetchWorkflowRunJobs lists jobs for a specific workflow run via the REST API.
+func FetchWorkflowRunJobs(repo string, runID string) (RestWorkflowJobsResponse, error) {
+	res := RestWorkflowJobsResponse{}
+	if _, err := strconv.Atoi(runID); err != nil {
+		return res, fmt.Errorf("invalid run ID %q: must be numeric", runID)
+	}
+	c, err := getHTTPClient()
+	if err != nil {
+		return res, err
+	}
+
+	jobsUrl, err := url.Parse(fmt.Sprintf("https://api.github.com/repos/%s/actions/runs/%s/jobs", repo, runID))
+	if err != nil {
+		return res, err
+	}
+
+	log.Debug("fetching workflow run jobs", "url", jobsUrl)
+	startTime := time.Now()
+	resp, err := c.Get(jobsUrl.String())
+	if err != nil {
+		return res, err
+	}
+	log.Debug("FetchWorkflowRunJobs request completed", "duration", time.Since(startTime))
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return res, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	err = json.Unmarshal(body, &res)
+	if err != nil {
+		log.Error("error parsing workflow run jobs response", "err", err)
+		return res, err
+	}
+
+	return res, nil
 }
 
 func ReRunJob(repo string, jobId string) error {

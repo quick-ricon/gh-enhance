@@ -82,7 +82,7 @@ func (m *model) startFetchingPRChecksWithInterval() tea.Cmd {
 }
 
 func (m *model) fetchPRChecks(prNumber string) tea.Msg {
-	log.Info("fetching pr checks from the begginging")
+	log.Info("fetching pr checks from the beginning")
 	return m.fetchPRChecksWithCursor(prNumber, "")
 }
 
@@ -501,9 +501,11 @@ func (m *model) rerunJob(runId string, jobId string) []tea.Cmd {
 		return cmds
 	}
 
-	commits := m.prWithChecks.Commits.Nodes
-	if len(commits) > 0 {
-		commits[0].Commit.StatusCheckRollup.State = api.CommitStatePending
+	if m.mode == ModePR {
+		commits := m.prWithChecks.Commits.Nodes
+		if len(commits) > 0 {
+			commits[0].Commit.StatusCheckRollup.State = api.CommitStatePending
+		}
 	}
 	ji.job.Bucket = data.CheckBucketPending
 	ji.job.State = api.StatusPending
@@ -534,9 +536,11 @@ func (m *model) rerunRun(runId string) []tea.Cmd {
 		return cmds
 	}
 
-	commits := m.prWithChecks.Commits.Nodes
-	if len(commits) > 0 {
-		commits[0].Commit.StatusCheckRollup.State = api.CommitStatePending
+	if m.mode == ModePR {
+		commits := m.prWithChecks.Commits.Nodes
+		if len(commits) > 0 {
+			commits[0].Commit.StatusCheckRollup.State = api.CommitStatePending
+		}
 	}
 	ri.run.Event = "manual rerun"
 	ri.run.Bucket = data.CheckBucketPending
@@ -581,6 +585,131 @@ func filterForCheckRuns(nodes []api.ContextNode) []api.CheckRun {
 		checkRuns = append(checkRuns, node.CheckRun)
 	}
 	return checkRuns
+}
+
+// --- Repo mode messages and commands ---
+
+type repoRunsFetchedMsg struct {
+	runs []data.WorkflowRun
+	err  error
+}
+
+type repoRunJobsFetchedMsg struct {
+	runId string
+	jobs  []data.WorkflowJob
+	err   error
+}
+
+func (m *model) makeInitRepoCmd() tea.Cmd {
+	return tea.Batch(
+		m.runsList.StartSpinner(),
+		m.jobsList.StartSpinner(),
+		m.logsSpinner.Tick,
+		m.makeFetchRepoRunsCmd(),
+	)
+}
+
+func (m *model) startFetchingRepoRunsWithInterval() tea.Cmd {
+	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
+		if !m.hasInProgressRuns() {
+			return nil
+		}
+		return startIntervalFetching{}
+	})
+}
+
+func (m *model) fetchRepoRunsWithInterval() tea.Cmd {
+	return tea.Batch(
+		m.makeFetchRepoRunsCmd(),
+		tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
+			if !m.hasInProgressRuns() {
+				log.Info("no in-progress runs - not refetching anymore")
+				return nil
+			}
+			return startIntervalFetching{}
+		}),
+	)
+}
+
+func (m *model) makeFetchRepoRunsCmd() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := api.FetchRepoWorkflowRuns(m.repo, m.repoRunsFilter)
+		if err != nil {
+			return repoRunsFetchedMsg{err: err}
+		}
+		runs := makeRepoWorkflowRuns(resp)
+		return repoRunsFetchedMsg{runs: runs}
+	}
+}
+
+func (m *model) makeFetchRepoRunJobsCmd(runId string) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := api.FetchWorkflowRunJobs(m.repo, runId)
+		if err != nil {
+			return repoRunJobsFetchedMsg{runId: runId, err: err}
+		}
+		jobs := makeRepoWorkflowJobs(resp)
+		return repoRunJobsFetchedMsg{runId: runId, jobs: jobs}
+	}
+}
+
+func makeRepoWorkflowRuns(resp api.RestWorkflowRunsResponse) []data.WorkflowRun {
+	runs := make([]data.WorkflowRun, 0, len(resp.WorkflowRuns))
+	for _, r := range resp.WorkflowRuns {
+		var bucket data.CheckBucket = data.CheckBucketPending
+		if strings.EqualFold(r.Status, "completed") {
+			bucket = data.GetConclusionBucket(api.Conclusion(strings.ToUpper(r.Conclusion)))
+		}
+		runs = append(runs, data.WorkflowRun{
+			Id:        fmt.Sprintf("%d", r.Id),
+			Name:      r.Name,
+			Link:      r.HtmlUrl,
+			Event:     r.Event,
+			Branch:    r.HeadBranch,
+			Bucket:    bucket,
+			StartedAt: r.RunStartedAt,
+			UpdatedAt: r.UpdatedAt,
+			RunNumber: r.RunNumber,
+		})
+	}
+	return runs
+}
+
+func makeRepoWorkflowJobs(resp api.RestWorkflowJobsResponse) []data.WorkflowJob {
+	jobs := make([]data.WorkflowJob, 0, len(resp.Jobs))
+	for _, j := range resp.Jobs {
+		steps := make([]api.Step, 0, len(j.Steps))
+		for _, s := range j.Steps {
+			steps = append(steps, api.Step{
+				Conclusion:  api.Conclusion(strings.ToUpper(s.Conclusion)),
+				Name:        s.Name,
+				Number:      s.Number,
+				StartedAt:   s.StartedAt,
+				CompletedAt: s.CompletedAt,
+				Status:      api.Status(strings.ToUpper(s.Status)),
+			})
+		}
+
+		var bucket data.CheckBucket = data.CheckBucketPending
+		if strings.EqualFold(j.Status, "completed") {
+			bucket = data.GetConclusionBucket(api.Conclusion(strings.ToUpper(j.Conclusion)))
+		}
+
+		jobs = append(jobs, data.WorkflowJob{
+			Id:          fmt.Sprintf("%d", j.Id),
+			State:       api.Status(strings.ToUpper(j.Status)),
+			Conclusion:  api.Conclusion(strings.ToUpper(j.Conclusion)),
+			Name:        j.Name,
+			Link:        j.HtmlUrl,
+			Steps:       steps,
+			StartedAt:   j.StartedAt,
+			CompletedAt: j.CompletedAt,
+			Bucket:      bucket,
+			Kind:        data.JobKindGithubActions,
+		})
+	}
+	data.SortJobs(jobs)
+	return jobs
 }
 
 func (m *model) nextPane() pane {

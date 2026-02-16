@@ -16,9 +16,11 @@ type WorkflowRun struct {
 	Link      string
 	Workflow  string
 	Event     string
+	Branch    string
 	Jobs      []WorkflowJob
 	Bucket    CheckBucket
 	StartedAt time.Time
+	UpdatedAt time.Time
 	RunNumber int
 }
 
@@ -103,7 +105,7 @@ func (run WorkflowRun) SortJobs() {
 	SortJobs(run.Jobs)
 }
 
-// Order: failed -> in progress -> skipped -> neutral -> haven't started -> started at -> name
+// Order: failed -> in progress -> neutral -> haven't started -> started at -> name -> skipped
 func SortJobs(jobs []WorkflowJob) {
 	sort.SliceStable(jobs, func(i, j int) bool {
 		if jobs[i].Bucket == CheckBucketFail &&
@@ -124,15 +126,6 @@ func SortJobs(jobs []WorkflowJob) {
 			return false
 		}
 
-		if jobs[i].Conclusion == api.ConclusionSkipped &&
-			jobs[j].Conclusion != api.ConclusionSkipped {
-			return true
-		}
-		if jobs[j].Conclusion == api.ConclusionSkipped &&
-			jobs[i].Conclusion != api.ConclusionSkipped {
-			return false
-		}
-
 		if jobs[i].Conclusion == api.ConclusionNeutral &&
 			jobs[j].Conclusion != api.ConclusionNeutral {
 			return true
@@ -140,6 +133,16 @@ func SortJobs(jobs []WorkflowJob) {
 		if jobs[j].Conclusion == api.ConclusionNeutral &&
 			jobs[i].Conclusion != api.ConclusionNeutral {
 			return false
+		}
+
+		// Skipped jobs sort last
+		if jobs[i].Conclusion == api.ConclusionSkipped &&
+			jobs[j].Conclusion != api.ConclusionSkipped {
+			return false
+		}
+		if jobs[j].Conclusion == api.ConclusionSkipped &&
+			jobs[i].Conclusion != api.ConclusionSkipped {
+			return true
 		}
 
 		if jobs[i].StartedAt.IsZero() {

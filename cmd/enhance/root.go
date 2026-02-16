@@ -7,6 +7,7 @@ import (
 	slog "log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charmbracelet/fang"
+	"github.com/dlvhdr/gh-enhance/internal/api"
 	"github.com/dlvhdr/gh-enhance/internal/tui"
 )
 
@@ -28,12 +30,20 @@ var rootCmd = &cobra.Command{
 	Use:   "gh enhance [<PR URL> | <PR number>] [flags]",
 	Long:  lipgloss.NewStyle().Foreground(lipgloss.Green).Render(asciiArt),
 	Short: "A Blazingly Fast Terminal UI for GitHub Actions",
-	Args:  cobra.ExactArgs(1),
-	Example: `# look up via a full URL to a GitHub PR
+	Args:  cobra.MaximumNArgs(1),
+	Example: `# view all workflow runs for the current repo
+ gh enhance
+
+ # view workflow runs for a specific repo
+ gh enhance -R dlvhdr/gh-dash
+
+ # view workflow runs filtered by branch
+ gh enhance --branch main
+
+ # look up via a full URL to a GitHub PR
  gh enhance https://github.com/dlvhdr/gh-dash/pull/767
 
- # look up via a PR number when inside a clone of dlvhdr/gh-dash
- # will look at checks of https://github.com/dlvhdr/gh-dash/pull/767
+ # look up via a PR number
  gh enhance 767`,
 }
 
@@ -112,18 +122,33 @@ func init() {
 		"help for gh-enhance",
 	)
 
-	rootCmd.SetVersionTemplate(`gh-enhance {{printf "version %s\n" .Version}}`)
+	rootCmd.Flags().String("branch", "", "Filter workflow runs by branch name")
+	rootCmd.Flags().String("workflow", "", "Filter workflow runs by workflow filename (e.g. ci.yml) or ID")
+	rootCmd.Flags().String("event", "", "Filter workflow runs by event type (push, pull_request, schedule, etc.)")
+	rootCmd.Flags().String("status", "", "Filter workflow runs by status (queued, in_progress, completed)")
 
 	rootCmd.Run = func(_ *cobra.Command, args []string) {
-		url, err := url.Parse(args[0])
-		if err == nil && url.Hostname() == "github.com" {
-			parts := strings.Split(url.Path, "/")
-			if len(parts) < 5 {
-				exitWithUsage()
+		mode := tui.ModeRepo
+
+		if len(args) > 0 {
+			u, err := url.Parse(args[0])
+			if err == nil && u.Hostname() == "github.com" {
+				parts := strings.Split(u.Path, "/")
+				if len(parts) < 5 {
+					exitWithUsage()
+				}
+				repo = parts[1] + "/" + parts[2]
+				number = parts[4]
 			}
 
-			repo = parts[1] + "/" + parts[2]
-			number = parts[4]
+			if number == "" {
+				if _, err := strconv.Atoi(args[0]); err != nil {
+					fmt.Printf("Error: %q is not a valid PR number or GitHub URL.\n", args[0])
+					os.Exit(1)
+				}
+				number = args[0]
+			}
+			mode = tui.ModePR
 		}
 
 		if repo == "" {
@@ -133,8 +158,9 @@ func init() {
 			}
 		}
 
-		if number == "" {
-			number = args[0]
+		if repo == "" {
+			fmt.Println("Error: could not determine repository. Use -R flag or run from within a repo.")
+			os.Exit(1)
 		}
 
 		flat, err := rootCmd.Flags().GetBool("flat")
@@ -142,7 +168,34 @@ func init() {
 			log.Fatal("Cannot parse the flat flag", err)
 		}
 
-		p := tea.NewProgram(tui.NewModel(repo, number, tui.ModelOpts{Flat: flat}))
+		opts := tui.ModelOpts{Flat: flat, Mode: mode}
+		if mode == tui.ModeRepo {
+			branch, err := rootCmd.Flags().GetString("branch")
+			if err != nil {
+				log.Fatal("Cannot parse the branch flag", err)
+			}
+			workflow, err := rootCmd.Flags().GetString("workflow")
+			if err != nil {
+				log.Fatal("Cannot parse the workflow flag", err)
+			}
+			event, err := rootCmd.Flags().GetString("event")
+			if err != nil {
+				log.Fatal("Cannot parse the event flag", err)
+			}
+			status, err := rootCmd.Flags().GetString("status")
+			if err != nil {
+				log.Fatal("Cannot parse the status flag", err)
+			}
+			opts.RepoRunsFilter = api.RepoRunsFilter{
+				Branch:   branch,
+				Workflow: workflow,
+				Event:    event,
+				Status:   status,
+				PerPage:  30,
+			}
+		}
+
+		p := tea.NewProgram(tui.NewModel(repo, number, opts))
 		if _, err := p.Run(); err != nil {
 			log.Error("failed starting program", "err", err)
 			fmt.Println(err)

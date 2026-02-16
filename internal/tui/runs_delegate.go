@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
@@ -16,11 +17,12 @@ import (
 )
 
 type runItem struct {
-	meta      itemMeta
-	run       *data.WorkflowRun
-	jobsItems []*jobItem
-	loading   bool
-	spinner   spinner.Model
+	meta               itemMeta
+	run                *data.WorkflowRun
+	jobsItems          []*jobItem
+	loading            bool
+	spinner            spinner.Model
+	lastSelectedJobId string
 }
 
 // Title implements /charm.land/bubbles.list.DefaultItem.Title
@@ -34,14 +36,48 @@ func (i *runItem) Title() string {
 
 // Description implements /charm.land/bubbles.list.DefaultItem.Description
 func (i *runItem) Description() string {
+	desc := ""
 	if i.run.Event == "" {
 		if i.run.Workflow == "" {
-			return "status check"
+			desc = "status check"
+		} else {
+			desc = i.run.Workflow
 		}
-		return i.run.Workflow
+	} else {
+		desc = fmt.Sprintf("on: %s", i.run.Event)
 	}
 
-	return fmt.Sprintf("on: %s", i.run.Event)
+	if i.run.Branch != "" {
+		desc += " · " + i.run.Branch
+	}
+
+	if dur := i.runDuration(); dur != "" {
+		desc += " · " + dur
+	}
+
+	return desc
+}
+
+func (i *runItem) runDuration() string {
+	if i.run.StartedAt.IsZero() {
+		return ""
+	}
+	var d time.Duration
+	if !i.run.UpdatedAt.IsZero() && !i.IsInProgress() {
+		d = i.run.UpdatedAt.Sub(i.run.StartedAt)
+	} else {
+		d = time.Since(i.run.StartedAt)
+	}
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
 // FilterValue implements /charm.land/bubbles.list.Item.FilterValue
@@ -115,7 +151,7 @@ func (d *runsDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		log.Info("key pressed on run", "key", msg.Text)
+		log.Info("key pressed on run", "key", msg.String())
 		switch {
 		case key.Matches(msg, openUrlKey):
 			return makeOpenUrlCmd(selected.run.Link)

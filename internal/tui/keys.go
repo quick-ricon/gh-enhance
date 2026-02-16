@@ -34,13 +34,13 @@ var (
 	)
 
 	nextPaneKey = key.NewBinding(
-		key.WithKeys("l"),
-		key.WithHelp("l", "next pane"),
+		key.WithKeys("l", "right"),
+		key.WithHelp("l/→", "next pane"),
 	)
 
 	prevPaneKey = key.NewBinding(
-		key.WithKeys("h"),
-		key.WithHelp("h", "previous pane"),
+		key.WithKeys("h", "left"),
+		key.WithHelp("h/←", "previous pane"),
 	)
 
 	gotoTopKey = key.NewBinding(
@@ -106,5 +106,15 @@ var (
 	helpKey = key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "toggle help"),
+	)
+
+	enterScrollKey = key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "scroll logs"),
+	)
+
+	exitScrollKey = key.NewBinding(
+		key.WithKeys("esc", "enter", "q"),
+		key.WithHelp("esc/enter/q", "exit scroll"),
 	)
 )

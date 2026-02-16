@@ -45,43 +45,57 @@ const (
 	PaneLogs
 )
 
+// ViewMode determines whether the TUI is showing PR checks or repo-level workflow runs.
+type ViewMode int
+
+const (
+	ModePR ViewMode = iota
+	ModeRepo
+)
+
 type model struct {
-	width             int
-	height            int
-	prNumber          string
-	repo              string
-	pr                api.PR
-	prWithChecks      api.PRWithChecks
-	workflowRuns      []data.WorkflowRun
-	runsList          list.Model
-	jobsList          list.Model
-	stepsList         list.Model
-	checksList        list.Model
-	logsViewport      viewport.Model
-	numHighlights     int
-	scrollbar         util.Model
-	focusedPane       pane
-	zoomedPane        *pane
-	err               error
-	runsDelegate      list.ItemDelegate
-	jobsDelegate      list.ItemDelegate
-	stepsDelegate     list.ItemDelegate
-	checksDelegate    list.ItemDelegate
-	styles            styles
-	logsSpinner       spinner.Model
-	logsInput         textinput.Model
-	inProgressSpinner spinner.Model
-	flat              bool
-	lastTick          time.Time
-	version           string
-	rateLimit         api.RateLimit
-	lastFetched       time.Time
-	helpOpen          bool
-	help              help.Model
+	width              int
+	height             int
+	mode               ViewMode
+	prNumber           string
+	repo               string
+	pr                 api.PR
+	prWithChecks       api.PRWithChecks
+	repoRunsFilter     api.RepoRunsFilter
+	workflowRuns       []data.WorkflowRun
+	runsList           list.Model
+	jobsList           list.Model
+	stepsList          list.Model
+	checksList         list.Model
+	logsViewport       viewport.Model
+	numHighlights      int
+	scrollbar          util.Model
+	focusedPane        pane
+	zoomedPane         *pane
+	err                error
+	runsDelegate       list.ItemDelegate
+	jobsDelegate       list.ItemDelegate
+	stepsDelegate      list.ItemDelegate
+	checksDelegate     list.ItemDelegate
+	styles             styles
+	logsSpinner        spinner.Model
+	logsInput          textinput.Model
+	inProgressSpinner  spinner.Model
+	flat               bool
+	lastTick           time.Time
+	version            string
+	rateLimit          api.RateLimit
+	lastFetched        time.Time
+	helpOpen           bool
+	help               help.Model
+	logsScrollMode     bool
+	repoRefreshStarted bool
 }
 
 type ModelOpts struct {
-	Flat bool
+	Flat           bool
+	Mode           ViewMode
+	RepoRunsFilter api.RepoRunsFilter
 }
 
 func NewModel(repo string, number string, opts ModelOpts) model {
@@ -185,8 +199,10 @@ func NewModel(repo string, number string, opts ModelOpts) model {
 		runsList:          runsList,
 		stepsList:         stepsList,
 		checksList:        checksList,
+		mode:              opts.Mode,
 		prNumber:          number,
 		repo:              repo,
+		repoRunsFilter:    opts.RepoRunsFilter,
 		runsDelegate:      runsDelegate,
 		jobsDelegate:      jobsDelegate,
 		stepsDelegate:     stepsDelegate,
@@ -203,12 +219,16 @@ func NewModel(repo string, number string, opts ModelOpts) model {
 		focusedPane:       focusedPane,
 		lastFetched:       time.Now(),
 	}
+	keys.mode = opts.Mode
 	m.help.SetKeys(keys.FullHelp())
 	m.setFocusedPaneStyles()
 	return m
 }
 
 func (m model) Init() tea.Cmd {
+	if m.mode == ModeRepo {
+		return m.makeInitRepoCmd()
+	}
 	return m.makeInitCmd()
 }
 
@@ -230,7 +250,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// `m.fetchPRChecksWithInterval` needs an up to date model, so this *cannot* be called
 	// at the `m.makeInitCmd`. The up to date model is received by this `Update` func.
 	case startIntervalFetching:
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case prFetchedMsg:
 		m.pr = msg.pr
@@ -288,6 +312,69 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Sequence(msgCmd, tea.Quit)
 		}
 
+	case repoRunsFetchedMsg:
+		if msg.err != nil {
+			log.Debug("error when fetching repo workflow runs", "err", msg.err)
+			m.err = msg.err
+			msgCmd := tea.Printf("%s\nrepo=%s\nOriginal error: %v\n",
+				lipgloss.NewStyle().Foreground(m.styles.colors.errorColor).Bold(true).Render(
+					"❌ Failed to fetch workflow runs."), m.repo, msg.err)
+			return m, tea.Sequence(msgCmd, tea.Quit)
+		}
+		m.workflowRuns = msg.runs
+		m.lastFetched = time.Now()
+		m.stopSpinners()
+		cmds = append(cmds, m.onWorkflowRunsFetched()...)
+		// Start the refresh interval after the initial fetch completes, so
+		// hasInProgressRuns() sees actual data instead of an empty slice.
+		if !m.repoRefreshStarted {
+			m.repoRefreshStarted = true
+			cmds = append(cmds, m.startFetchingRepoRunsWithInterval())
+		}
+
+	case repoRunJobsFetchedMsg:
+		if msg.err != nil {
+			log.Error("error fetching run jobs", "runId", msg.runId, "err", msg.err)
+			break
+		}
+		ri := m.getRunItemById(msg.runId)
+		if ri != nil {
+			ri.loading = false
+			ri.run.Jobs = msg.jobs
+			selectedJob := m.getSelectedJobItem()
+			jobs := make([]*jobItem, 0)
+			for _, job := range msg.jobs {
+				ji := m.getJobItemById(job.Id)
+				if ji == nil {
+					nji := NewJobItem(job, m.styles)
+					ji = &nji
+					cmds = append(cmds, ji.Tick(), m.inProgressSpinner.Tick)
+				}
+				ji.job = &job
+				isSelected := selectedJob != nil && selectedJob.job.Id == ji.job.Id
+				cmds = append(cmds, m.enrichJobItemWithSteps(ji, job.Steps, job.Link, isSelected)...)
+				jobs = append(jobs, ji)
+			}
+			ri.jobsItems = jobs
+			cmds = append(cmds, m.updateLists()...)
+
+			// Restore job selection by ID and only reset if the job changed.
+			if selectedJob != nil {
+				for i, item := range m.jobsList.Items() {
+					if item.(*jobItem).job.Id == selectedJob.job.Id {
+						m.jobsList.Select(i)
+						break
+					}
+				}
+				newJob := m.getSelectedJobItem()
+				if newJob == nil || newJob.job.Id != selectedJob.job.Id {
+					cmds = append(cmds, m.onJobChanged()...)
+				}
+			} else {
+				cmds = append(cmds, m.onJobChanged()...)
+			}
+		}
+
 	case workflowRunStepsFetchedMsg:
 		cmds = append(cmds, m.enrichRunWithJobsStepsV2(msg)...)
 		cmds = append(cmds, m.updateLists()...)
@@ -338,7 +425,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.lastFetched = time.Now()
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case reRunRunMsg:
 		if msg.err != nil {
@@ -350,7 +441,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.lastFetched = time.Now()
-		cmds = append(cmds, m.fetchPRChecksWithInterval())
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.fetchRepoRunsWithInterval())
+		} else {
+			cmds = append(cmds, m.fetchPRChecksWithInterval())
+		}
 
 	case tea.WindowSizeMsg:
 		log.Info("window size changed", "width", msg.Width, "height", msg.Height)
@@ -378,10 +473,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(msg, applySearchKey) {
 				ji := m.getSelectedJobItem()
 				if ji != nil {
-					m.logsViewport.SetContentLines(ji.unstyledLogs)
+					start, end := m.getStepLogRange(ji)
+					filteredUnstyled := ji.unstyledLogs[start:end]
+					m.logsViewport.SetContentLines(filteredUnstyled)
 					highlights := regexp.MustCompile(
 						m.logsInput.Value()).FindAllStringIndex(
-						strings.Join(ji.unstyledLogs, "\n"), -1)
+						strings.Join(filteredUnstyled, "\n"), -1)
 					m.numHighlights = len(highlights)
 					m.logsViewport.SetHighlights(highlights)
 					m.logsViewport.HighlightNext()
@@ -394,7 +491,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if key.Matches(msg, modeKey) {
+		if key.Matches(msg, modeKey) && m.mode != ModeRepo {
 			m.flat = !m.flat
 			if m.flat {
 				m.focusedPane = PaneChecks
@@ -419,7 +516,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if key.Matches(msg, refreshAllKey) {
-			newModel := NewModel(m.repo, m.prNumber, ModelOpts{})
+			newModel := NewModel(m.repo, m.prNumber, ModelOpts{
+				Mode:           m.mode,
+				RepoRunsFilter: m.repoRunsFilter,
+			})
 			newModel.flat = m.flat
 			newModel.width = m.width
 			newModel.height = m.height
@@ -429,7 +529,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newModel.setFocusedPaneStyles()
 
 			m.lastFetched = time.Now()
-			return newModel, newModel.makeInitCmd()
+			return newModel, newModel.Init()
 		}
 
 		if key.Matches(msg, rerunKey) {
@@ -462,20 +562,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.logsInput.Focus())
 		}
 
-		if key.Matches(msg, openPRKey) && m.prWithChecks.Url != "" {
-			cmds = append(cmds, makeOpenUrlCmd(m.prWithChecks.Url))
+		if key.Matches(msg, openPRKey) {
+			if m.mode == ModeRepo {
+				cmds = append(cmds, makeOpenUrlCmd(
+					fmt.Sprintf("https://github.com/%s/actions", m.repo)))
+			} else if m.prWithChecks.Url != "" {
+				cmds = append(cmds, makeOpenUrlCmd(m.prWithChecks.Url))
+			}
 		}
 
-		if key.Matches(msg, nextPaneKey) {
-			m.focusedPane = m.nextPane()
-			m.zoomedPane = nil
-			m.setFocusedPaneStyles()
-		}
+		// Block all pane navigation while in logs scroll mode.
+		// User must Escape first to exit scroll mode.
+		if !m.logsScrollMode {
+			enterNavigation := key.Matches(msg, enterScrollKey) && m.focusedPane != PaneLogs
+			if key.Matches(msg, nextPaneKey) || enterNavigation {
+				m.savePaneSelection()
+				m.focusedPane = m.nextPane()
+				m.zoomedPane = nil
+				m.setFocusedPaneStyles()
+				if enterNavigation {
+					return m, tea.Batch(cmds...)
+				}
+			}
 
-		if key.Matches(msg, prevPaneKey) {
-			m.focusedPane = m.previousPane()
-			m.zoomedPane = nil
-			m.setFocusedPaneStyles()
+			if key.Matches(msg, prevPaneKey) {
+				m.savePaneSelection()
+				m.focusedPane = m.previousPane()
+				m.zoomedPane = nil
+				m.setFocusedPaneStyles()
+			}
 		}
 
 	case spinner.TickMsg:
@@ -560,6 +675,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateLists()...)
 		}
 	case PaneRuns:
+		// Save job selection for current run before potentially switching runs
+		m.savePaneSelection()
 		before := m.runsList.GlobalIndex()
 		m.runsList, cmd = m.runsList.Update(msg)
 		cmds = append(cmds, cmd)
@@ -569,6 +686,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateLists()...)
 		}
 	case PaneJobs:
+		// Save step selection for current job before potentially switching jobs
+		m.savePaneSelection()
 		before := m.jobsList.GlobalIndex()
 		m.jobsList, cmd = m.jobsList.Update(msg)
 		cmds = append(cmds, cmd)
@@ -587,6 +706,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PaneLogs:
 		if msg, ok := msg.(tea.KeyPressMsg); ok {
+			// Enter/Escape toggle scroll mode
+			if key.Matches(msg, enterScrollKey) && !m.logsScrollMode {
+				m.logsScrollMode = true
+				break
+			}
+			if key.Matches(msg, exitScrollKey) && m.logsScrollMode {
+				m.logsScrollMode = false
+				break
+			}
+
+			// These work regardless of scroll mode
 			if key.Matches(msg, gotoBottomKey) {
 				m.logsViewport.GotoBottom()
 			}
@@ -608,10 +738,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logsInput.Reset()
 				m.numHighlights = 0
 				m.logsViewport.ClearHighlights()
-				ji := m.getSelectedJobItem()
-				if ji != nil {
-					m.logsViewport.SetContentLines(ji.renderedLogs)
-				}
+				m.setStepLogs()
+			}
+
+			// Only forward key events to viewport when in scroll mode
+			if !m.logsScrollMode {
+				break
 			}
 		}
 		m.logsViewport, cmd = m.logsViewport.Update(msg)
@@ -782,6 +914,16 @@ func (m *model) viewHeader() string {
 				m.styles.faintFgStyle.Render(version),
 			)))
 
+	if m.mode == ModeRepo {
+		titleWidth := m.width - logoWidth - m.styles.headerStyle.GetHorizontalFrameSize()
+		title := bgStyle.Width(titleWidth).Render(lipgloss.JoinVertical(lipgloss.Left,
+			bgStyle.Foreground(m.styles.colors.darkColor).Bold(true).Render(m.repo),
+			bgStyle.Foreground(m.styles.colors.faintColor).Render("Workflow Runs"),
+		))
+		return m.styles.headerStyle.Width(m.width).Render(
+			lipgloss.JoinHorizontal(lipgloss.Left, bgStyle.Render(title), logo))
+	}
+
 	status := bgStyle.Render(m.viewCommitStatus(bgStyle))
 	prWidth := m.width - lipgloss.Width(status) - logoWidth -
 		m.styles.headerStyle.GetHorizontalFrameSize()
@@ -830,15 +972,65 @@ func (m *model) viewPRName(width int, bgStyle lipgloss.Style) string {
 	return bgStyle.Width(width).Bold(true).Render(m.pr.Title)
 }
 
+func (m *model) renderFooterBar(totalText, statusView string, refreshing bool) string {
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	sFooter := m.styles.footerStyle.Width(m.width)
+
+	reFetchingIn := ""
+	if refreshing {
+		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
+		untilStr := fmt.Sprintf("in %ds", int(until))
+		if until <= 0 {
+			untilStr = "now..."
+		}
+		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("refreshing %s", untilStr))
+	}
+
+	helpView := m.styles.helpButtonStyle.Render("? help")
+
+	gap := bg.Render(
+		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(statusView)-
+			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
+			m.styles.footerStyle.GetHorizontalFrameSize())))
+
+	return sFooter.Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, totalText, statusView, gap, reFetchingIn, helpView))
+}
+
+func (m *model) footerStatusTexts(failing, inProgress, successful, skipped int) string {
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	texts := make([]string, 0)
+	if failing > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
+			fmt.Sprintf("%d failing", failing)))
+	}
+	if inProgress > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
+			fmt.Sprintf("%d in progress", inProgress)))
+	}
+	if successful > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
+			fmt.Sprintf("%d successful", successful)))
+	}
+	if skipped > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("%d skipped", skipped)))
+	}
+	return bg.Render(strings.Join(texts, bg.Render(", ")))
+}
+
 func (m *model) viewFooter() string {
+	if m.mode == ModeRepo {
+		return m.viewRepoFooter()
+	}
+
 	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
 	sFooter := m.styles.footerStyle.Width(m.width)
 
 	if m.width == 0 || len(m.prWithChecks.Commits.Nodes) == 0 {
 		return sFooter.Inherit(bg).Render("")
 	}
-
-	texts := make([]string, 0)
 
 	contexts := m.prWithChecks.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts
 	total := contexts.CheckRunCount + contexts.StatusContextCount
@@ -849,61 +1041,66 @@ func (m *model) viewFooter() string {
 	}
 
 	stats := checks.AccumulatedStats(contexts.CheckRunCountsByState, contexts.StatusContextCountsByState)
+	statusView := m.footerStatusTexts(stats.Failed, stats.InProgress, stats.Succeeded, stats.Skipped)
+	refreshing := m.prWithChecks.Number != 0 && m.prWithChecks.IsStatusCheckInProgress()
 
-	if stats.Failed > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
-			fmt.Sprintf("%d failing", stats.Failed)))
-	}
-	if stats.InProgress > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
-			fmt.Sprintf("%d in progress", stats.InProgress)))
-	}
-	if stats.Succeeded > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
-			fmt.Sprintf("%d successful", stats.Succeeded)))
-	}
-	if stats.Skipped > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
-			fmt.Sprintf("%d skipped", stats.Skipped)))
+	return m.renderFooterBar(totalText, statusView, refreshing)
+}
+
+func (m *model) viewRepoFooter() string {
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	sFooter := m.styles.footerStyle.Width(m.width)
+
+	if m.width == 0 {
+		return sFooter.Inherit(bg).Render("")
 	}
 
-	checks := bg.Render(strings.Join(texts, bg.Render(", ")))
-
-	reFetchingIn := ""
-	if m.prWithChecks.Number != 0 && m.prWithChecks.IsStatusCheckInProgress() {
-		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
-		untilStr := fmt.Sprintf("in %ds", int(until))
-		if until <= 0 {
-			untilStr = "now..."
+	var failing, inProgress, successful, skipped int
+	for _, run := range m.workflowRuns {
+		switch run.Bucket {
+		case data.CheckBucketFail:
+			failing++
+		case data.CheckBucketPending:
+			inProgress++
+		case data.CheckBucketPass:
+			successful++
+		case data.CheckBucketSkipping:
+			skipped++
 		}
-		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(fmt.Sprintf("refreshing %s", untilStr))
 	}
 
-	help := m.styles.helpButtonStyle.Render("? help")
+	total := len(m.workflowRuns)
+	totalText := ""
+	if total > 0 {
+		totalText = bg.Foreground(m.styles.colors.lightColor).Render(
+			fmt.Sprintf("%d runs: ", total))
+	}
 
-	gap := bg.Render(
-		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(checks)-
-			lipgloss.Width(reFetchingIn)-lipgloss.Width(help)-
-			m.styles.footerStyle.GetHorizontalFrameSize())))
+	statusView := m.footerStatusTexts(failing, inProgress, successful, skipped)
 
-	return sFooter.Render(
-		lipgloss.JoinHorizontal(lipgloss.Top, totalText, checks, gap, reFetchingIn, help))
+	return m.renderFooterBar(totalText, statusView, m.hasInProgressRuns())
+}
+
+func (m *model) hasInProgressRuns() bool {
+	for _, run := range m.workflowRuns {
+		if run.Bucket == data.CheckBucketPending {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) shouldShowSteps() bool {
+	// In hierarchical mode, always show the steps pane to keep a stable layout.
+	if !m.flat {
+		return true
+	}
+
 	loadingSteps := false
-	if m.flat {
-		check := m.checksList.SelectedItem()
-		if check != nil {
-			ci := check.(*checkItem)
-			loadingSteps = ci.loadingSteps
-		}
-	} else {
-		job := m.jobsList.SelectedItem()
-		if job != nil {
-			ji := job.(*jobItem)
-			loadingSteps = ji.loadingSteps
-		}
+	check := m.checksList.SelectedItem()
+	if check != nil {
+		ci := check.(*checkItem)
+		loadingSteps = ci.loadingSteps
 	}
 
 	return loadingSteps || len(m.stepsList.VisibleItems()) > 0
@@ -913,7 +1110,13 @@ func (m *model) viewLogs() string {
 	title := "Job Logs"
 	w := m.logsWidth()
 	if m.focusedPane == PaneLogs {
-		title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.focusedColor)
+		if m.logsScrollMode {
+			title = "Job Logs (scroll)"
+			title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.warnColor)
+		} else {
+			title = "Job Logs · enter to scroll"
+			title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.focusedColor)
+		}
 		s := m.styles.focusedPaneTitleBarStyle.MarginBottom(0)
 		title = s.Render(title)
 	} else {
@@ -1248,6 +1451,28 @@ func (m *model) getSelectedJobItem() *jobItem {
 	}
 }
 
+// savePaneSelection stores the current child-list selection on the parent item
+// so it can be restored when navigating back.
+func (m *model) savePaneSelection() {
+	switch m.focusedPane {
+	case PaneRuns:
+		if ri := m.getSelectedRunItem(); ri != nil {
+			if ji := m.getSelectedJobItem(); ji != nil {
+				ri.lastSelectedJobId = ji.job.Id
+			}
+		}
+	case PaneJobs:
+		if ji := m.getSelectedJobItem(); ji != nil {
+			si := m.stepsList.SelectedItem()
+			if si != nil {
+				if step, ok := si.(*stepItem); ok {
+					ji.lastSelectedStepNum = step.step.Number
+				}
+			}
+		}
+	}
+}
+
 func (m *model) logsWidth() int {
 	if m.width == 0 {
 		return 0
@@ -1326,6 +1551,23 @@ func (m *model) isScrollbarVisible() bool {
 	return m.logsViewport.TotalLineCount() > m.logsViewport.VisibleLineCount()
 }
 
+// enrichJobItemWithSteps converts raw API steps into stepItems on a jobItem.
+// Used by both PR mode (GraphQL) and repo mode (REST) after steps are available.
+func (m *model) enrichJobItemWithSteps(ji *jobItem, steps []api.Step, jobUrl string, tickIfSelected bool) []tea.Cmd {
+	cmds := make([]tea.Cmd, 0)
+	stepItems := make([]*stepItem, 0, len(steps))
+	for _, step := range steps {
+		si := NewStepItem(step, jobUrl, m.styles)
+		if tickIfSelected {
+			cmds = append(cmds, si.Tick())
+		}
+		stepItems = append(stepItems, &si)
+	}
+	ji.steps = stepItems
+	ji.loadingSteps = false
+	return cmds
+}
+
 func (m *model) enrichRunWithJobsStepsV2(msg workflowRunStepsFetchedMsg) []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	jobsMap := make(map[string]api.CheckRunWithSteps)
@@ -1343,23 +1585,14 @@ func (m *model) enrichRunWithJobsStepsV2(msg workflowRunStepsFetchedMsg) []tea.C
 	selectedJob := m.getSelectedJobItem()
 	ri.loading = false
 	for jIdx, ji := range ri.jobsItems {
-		ri.jobsItems[jIdx].loadingSteps = false
 		jobWithSteps, ok := jobsMap[ji.job.Id]
 		if !ok {
+			ri.jobsItems[jIdx].loadingSteps = false
 			continue
 		}
 
-		steps := make([]*stepItem, 0)
-		for _, step := range jobWithSteps.Steps.Nodes {
-			si := NewStepItem(step, jobWithSteps.Url, m.styles)
-			if selectedJob != nil && selectedJob.job.Id == ji.job.Id {
-				cmds = append(cmds, si.Tick())
-			}
-
-			steps = append(steps, &si)
-		}
-
-		ri.jobsItems[jIdx].steps = steps
+		isSelected := selectedJob != nil && selectedJob.job.Id == ji.job.Id
+		cmds = append(cmds, m.enrichJobItemWithSteps(ri.jobsItems[jIdx], jobWithSteps.Steps.Nodes, jobWithSteps.Url, isSelected)...)
 	}
 
 	return cmds
@@ -1410,7 +1643,6 @@ func (m *model) onCheckChanged() []tea.Cmd {
 
 func (m *model) onRunChanged() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
-	m.jobsList.ResetSelected()
 	m.jobsList.ResetFilter()
 	newRun := m.runsList.SelectedItem()
 
@@ -1421,10 +1653,27 @@ func (m *model) onRunChanged() []tea.Cmd {
 	}
 
 	if ri.loading {
-		cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+		if m.mode == ModeRepo {
+			cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+		} else {
+			cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+		}
 	}
 
 	cmds = append(cmds, m.updateLists()...)
+
+	// Reset then restore saved job selection by ID.
+	// ResetSelected prevents the previous run's cursor from leaking.
+	m.jobsList.ResetSelected()
+	if ri.lastSelectedJobId != "" {
+		for i, item := range m.jobsList.Items() {
+			if ji, ok := item.(*jobItem); ok && ji.job.Id == ri.lastSelectedJobId {
+				m.jobsList.Select(i)
+				break
+			}
+		}
+	}
+
 	cmds = append(cmds, m.onJobChanged()...)
 
 	jobs := m.jobsList.Items()
@@ -1442,15 +1691,29 @@ func (m *model) onJobChanged() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	m.resetStepsState()
 	cmds = append(cmds, m.updateStepsList()...)
+
+	// Restore saved step selection by step number
+	currJob := m.getSelectedJobItem()
+	if currJob != nil && currJob.lastSelectedStepNum > 0 {
+		for i, item := range m.stepsList.Items() {
+			if si, ok := item.(*stepItem); ok && si.step.Number == currJob.lastSelectedStepNum {
+				m.stepsList.Select(i)
+				break
+			}
+		}
+	}
+
 	cmds = append(cmds, m.tickSteps()...)
 	cmds = append(cmds, m.logsSpinner.Tick, m.inProgressSpinner.Tick)
 
-	currJob := m.getSelectedJobItem()
-	if currJob != nil && !currJob.initiatedLogsFetch && !currJob.isStatusInProgress() {
+	if currJob == nil {
+		// No job selected yet — expected when navigating to a run whose jobs
+		// are still loading (repo mode fetches jobs lazily per-run).
+		return cmds
+	}
+	if !currJob.initiatedLogsFetch && !currJob.isStatusInProgress() {
 		log.Debug("onJobChanged - fetching logs", "currJob", currJob)
 		cmds = append(cmds, m.makeFetchJobLogsCmd())
-	} else if currJob == nil {
-		log.Error("job changed but current job is nil")
 	}
 
 	cmds = append(cmds, m.renderJobLogs())
@@ -1459,26 +1722,97 @@ func (m *model) onJobChanged() []tea.Cmd {
 	return cmds
 }
 
-func (m *model) onStepChanged() {
-	ji := m.getSelectedJobItem()
+// getStepLogRange returns the start (inclusive) and end (exclusive) indices
+// of log lines belonging to the currently selected step.
+// Uses LogKindStepStart and LogKindJobCleanup markers as section boundaries,
+// then maps the selected step to the correct section by ordinal position
+// (skipping over steps that were skipped and produced no log output).
+func (m *model) getStepLogRange(ji *jobItem) (int, int) {
 	step := m.stepsList.SelectedItem()
-	cursor := m.stepsList.Cursor()
-
 	if step == nil {
-		return
+		return 0, len(ji.logs)
 	}
 
-	if cursor == len(m.stepsList.Items())-1 {
-		m.logsViewport.GotoBottom()
-		return
+	si := step.(*stepItem)
+	if si.step.Conclusion == api.ConclusionSkipped {
+		return 0, 0
 	}
 
+	// Build section boundaries from log markers.
+	// Section 0 starts at index 0 ("Set up job").
+	// Each LogKindStepStart or LogKindJobCleanup marks a new section.
+	boundaries := []int{0}
 	for i, log := range ji.logs {
-		if log.Time.After(step.(*stepItem).step.StartedAt) {
-			m.logsViewport.SetYOffset(i - 1)
-			return
+		if log.Kind == data.LogKindStepStart || log.Kind == data.LogKindJobCleanup {
+			boundaries = append(boundaries, i)
 		}
 	}
+
+	// Map the selected step to its boundary index by counting
+	// non-skipped steps before it in the steps list.
+	// Use GlobalIndex() for absolute position (Cursor() is page-relative).
+	items := m.stepsList.Items()
+	globalIdx := m.stepsList.GlobalIndex()
+	boundaryIdx := 0
+	for i := 0; i < globalIdx; i++ {
+		s := items[i].(*stepItem)
+		if s.step.Conclusion != api.ConclusionSkipped {
+			boundaryIdx++
+		}
+	}
+
+	if boundaryIdx >= len(boundaries) {
+		return 0, 0
+	}
+
+	start := boundaries[boundaryIdx]
+	end := len(ji.logs)
+	if boundaryIdx+1 < len(boundaries) {
+		end = boundaries[boundaryIdx+1]
+	}
+
+	return start, end
+}
+
+// setStepLogs filters the viewport to show only the selected step's logs.
+func (m *model) setStepLogs() {
+	ji := m.getSelectedJobItem()
+	if ji == nil || len(ji.logs) == 0 {
+		return
+	}
+
+	start, end := m.getStepLogRange(ji)
+	if start >= end {
+		m.logsViewport.SetContent(
+			lipgloss.Place(
+				m.logsWidth(), m.logsViewport.Height(),
+				lipgloss.Center, lipgloss.Center,
+				m.styles.faintFgStyle.Bold(true).Render("No logs for this step")))
+		return
+	}
+
+	// Find the baseline depth so step-scoped logs render flush-left.
+	stepLogs := ji.logs[start:end]
+	baselineDepth := 0
+	for _, log := range stepLogs {
+		if log.Kind == data.LogKindStepNone && log.Depth > 0 {
+			baselineDepth = log.Depth
+			break
+		}
+	}
+
+	rendered, _ := m.renderLogLines(stepLogs, baselineDepth)
+	m.logsViewport.SetContentLines(rendered)
+}
+
+func (m *model) onStepChanged() {
+	ji := m.getSelectedJobItem()
+	if ji == nil || m.stepsList.SelectedItem() == nil {
+		return
+	}
+
+	m.setStepLogs()
+	m.logsViewport.GotoTop()
 }
 
 func (m *model) renderJobLogs() tea.Cmd {
@@ -1503,7 +1837,7 @@ func (m *model) renderJobLogs() tea.Cmd {
 	}
 
 	if len(ji.renderedLogs) != 0 {
-		m.logsViewport.SetContentLines(ji.renderedLogs)
+		m.setStepLogs()
 		m.setHeights()
 
 		return nil
@@ -1519,14 +1853,14 @@ func (m *model) renderJobLogs() tea.Cmd {
 	}
 
 	ji.renderedLogs, ji.unstyledLogs = m.renderLogs(ji)
-	m.logsViewport.SetContentLines(ji.renderedLogs)
+	m.setStepLogs()
 	m.setHeights()
 
 	return nil
 }
 
 func (m *model) logsContentView() string {
-	if m.prWithChecks.Number != 0 && len(m.prWithChecks.Commits.Nodes) > 0 &&
+	if m.mode == ModePR && m.prWithChecks.Number != 0 && len(m.prWithChecks.Commits.Nodes) > 0 &&
 		m.prWithChecks.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.CheckRunCount == 0 {
 		return m.fullScreenMessageView(
 			lipgloss.JoinVertical(lipgloss.Center,
@@ -1596,16 +1930,6 @@ func (m *model) getRunItemById(runId string) *runItem {
 	return nil
 }
 
-func (m *model) getRunItemByName(runName string) *runItem {
-	for _, run := range m.runsList.Items() {
-		ri := run.(*runItem)
-		if ri.run.Name == runName {
-			return ri
-		}
-	}
-	return nil
-}
-
 func (m *model) getCheckItemById(checkId string) *checkItem {
 	for _, check := range m.checksList.Items() {
 		ci := check.(*checkItem)
@@ -1637,18 +1961,16 @@ func (m *model) getJobItemById(jobId string) *jobItem {
 	return nil
 }
 
-func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
-	defer utils.TimeTrack(time.Now(), "rendering logs")
+func (m *model) renderLogLines(logs []data.LogsWithTime, depthOffset int) ([]string, []string) {
 	w := m.logsViewport.Width() - m.styles.scrollbarStyle.GetWidth()
 	expand := ExpandSymbol + " "
-	lines := make([]string, 0)
-	unstyledLines := make([]string, 0)
-	for i, log := range ji.logs {
+	lines := make([]string, 0, len(logs))
+	unstyledLines := make([]string, 0, len(logs))
+	for _, log := range logs {
 		rendered := log.Log
 		unstyled := ansi.Strip(log.Log)
 		switch log.Kind {
 		case data.LogKindError:
-			ji.errorLine = i
 			rendered = strings.Replace(rendered, parser.ErrorMarker, "", 1)
 			unstyled = rendered
 			rendered = m.styles.errorBgStyle.Width(w).Render(lipgloss.JoinHorizontal(lipgloss.Top,
@@ -1670,9 +1992,10 @@ func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
 		case data.LogKindStepNone:
 			sep := ""
 			unstyledSep := ""
-			if log.Depth > 0 {
+			adjDepth := log.Depth - depthOffset
+			if adjDepth > 0 {
 				dm := strings.Repeat(
-					fmt.Sprintf("%s  ", Separator), log.Depth)
+					fmt.Sprintf("%s  ", Separator), adjDepth)
 				unstyledSep = dm
 				sep = m.styles.separatorStyle.Render(dm)
 			}
@@ -1681,6 +2004,17 @@ func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
 		}
 		lines = append(lines, rendered)
 		unstyledLines = append(unstyledLines, unstyled)
+	}
+	return lines, unstyledLines
+}
+
+func (m *model) renderLogs(ji *jobItem) ([]string, []string) {
+	defer utils.TimeTrack(time.Now(), "rendering logs")
+	lines, unstyledLines := m.renderLogLines(ji.logs, 0)
+	for i, log := range ji.logs {
+		if log.Kind == data.LogKindError {
+			ji.errorLine = i
+		}
 	}
 	return lines, unstyledLines
 }
@@ -1752,7 +2086,12 @@ func (m *model) goToErrorInLogs() {
 				break
 			}
 		}
-		m.logsViewport.SetYOffset(currJob.errorLine)
+		m.setStepLogs()
+		start, _ := m.getStepLogRange(currJob)
+		offset := currJob.errorLine - start
+		if offset > 0 {
+			m.logsViewport.SetYOffset(offset)
+		}
 	} else {
 		m.logsViewport.GotoTop()
 	}
@@ -1851,11 +2190,28 @@ func (m *model) onWorkflowRunsFetched() []tea.Cmd {
 			before = selectedRun.(*runItem)
 		}
 
-		cmds = append(cmds, m.buildHierachicalChecksLists()...)
+		cmds = append(cmds, m.buildHierarchicalChecksLists()...)
+
+		// Restore run selection by ID after list rebuild (InsertItem can shift cursor).
+		if before != nil {
+			for i, item := range m.runsList.Items() {
+				if item.(*runItem).run.Id == before.run.Id {
+					m.runsList.Select(i)
+					break
+				}
+			}
+		}
 
 		if len(m.runsList.Items()) > 0 {
 			ri := m.runsList.SelectedItem().(*runItem)
-			cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+			if m.mode == ModeRepo {
+				// Only fetch jobs if we don't have them yet or the run is still in progress.
+				if ri.loading || ri.IsInProgress() || len(ri.jobsItems) == 0 {
+					cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+				}
+			} else {
+				cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
+			}
 			if before == nil || before.run.Id != ri.run.Id {
 				cmds = append(cmds, m.onRunChanged()...)
 			}
@@ -1904,10 +2260,10 @@ func (m *model) buildFlatChecksLists() []tea.Cmd {
 	return cmds
 }
 
-func (m *model) buildHierachicalChecksLists() []tea.Cmd {
+func (m *model) buildHierarchicalChecksLists() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	for i, run := range m.workflowRuns {
-		ri := m.getRunItemByName(run.Name)
+		ri := m.getRunItemById(run.Id)
 		if ri == nil {
 			nr := NewRunItem(run, m.styles)
 			ri = &nr
@@ -1916,19 +2272,24 @@ func (m *model) buildHierachicalChecksLists() []tea.Cmd {
 		}
 		ri.run = &run
 
-		jobs := make([]*jobItem, 0)
-		for _, job := range run.Jobs {
-			ji := m.getJobItemById(job.Id)
-			if ji == nil {
-				nji := NewJobItem(job, m.styles)
-				cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
-				ji = &nji
+		// In repo mode, jobs are fetched separately per-run and stored on
+		// the runItem. Don't overwrite them with empty data from the runs
+		// list API (which never includes jobs).
+		if len(run.Jobs) > 0 {
+			jobs := make([]*jobItem, 0)
+			for _, job := range run.Jobs {
+				ji := m.getJobItemById(job.Id)
+				if ji == nil {
+					nji := NewJobItem(job, m.styles)
+					cmds = append(cmds, nji.Tick(), m.inProgressSpinner.Tick)
+					ji = &nji
+				}
+				ji.job = &job
+				jobs = append(jobs, ji)
 			}
-			ji.job = &job
-			jobs = append(jobs, ji)
-		}
 
-		ri.jobsItems = jobs
+			ri.jobsItems = jobs
+		}
 	}
 	return cmds
 }
@@ -1978,6 +2339,7 @@ func (m *model) resetStepsState() {
 	m.logsViewport.ClearHighlights()
 	m.numHighlights = 0
 	m.logsInput.Reset()
+	m.stepsList.SetItems(make([]list.Item, 0))
 	m.stepsList.ResetSelected()
 	m.stepsList.ResetFilter()
 }
