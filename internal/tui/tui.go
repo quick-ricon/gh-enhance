@@ -49,43 +49,43 @@ const (
 type ViewMode int
 
 const (
-	ModePR   ViewMode = iota
+	ModePR ViewMode = iota
 	ModeRepo
 )
 
 type model struct {
-	width             int
-	height            int
-	mode              ViewMode
-	prNumber          string
-	repo              string
-	pr                api.PR
-	prWithChecks      api.PRWithChecks
-	repoRunsFilter    api.RepoRunsFilter
-	workflowRuns      []data.WorkflowRun
-	runsList          list.Model
-	jobsList          list.Model
-	stepsList         list.Model
-	checksList        list.Model
-	logsViewport      viewport.Model
-	numHighlights     int
-	scrollbar         util.Model
-	focusedPane       pane
-	zoomedPane        *pane
-	err               error
-	runsDelegate      list.ItemDelegate
-	jobsDelegate      list.ItemDelegate
-	stepsDelegate     list.ItemDelegate
-	checksDelegate    list.ItemDelegate
-	styles            styles
-	logsSpinner       spinner.Model
-	logsInput         textinput.Model
-	inProgressSpinner spinner.Model
-	flat              bool
-	lastTick          time.Time
-	version           string
-	rateLimit         api.RateLimit
-	lastFetched       time.Time
+	width              int
+	height             int
+	mode               ViewMode
+	prNumber           string
+	repo               string
+	pr                 api.PR
+	prWithChecks       api.PRWithChecks
+	repoRunsFilter     api.RepoRunsFilter
+	workflowRuns       []data.WorkflowRun
+	runsList           list.Model
+	jobsList           list.Model
+	stepsList          list.Model
+	checksList         list.Model
+	logsViewport       viewport.Model
+	numHighlights      int
+	scrollbar          util.Model
+	focusedPane        pane
+	zoomedPane         *pane
+	err                error
+	runsDelegate       list.ItemDelegate
+	jobsDelegate       list.ItemDelegate
+	stepsDelegate      list.ItemDelegate
+	checksDelegate     list.ItemDelegate
+	styles             styles
+	logsSpinner        spinner.Model
+	logsInput          textinput.Model
+	inProgressSpinner  spinner.Model
+	flat               bool
+	lastTick           time.Time
+	version            string
+	rateLimit          api.RateLimit
+	lastFetched        time.Time
 	helpOpen           bool
 	help               help.Model
 	logsScrollMode     bool
