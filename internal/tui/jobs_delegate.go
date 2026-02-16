@@ -32,9 +32,10 @@ type jobItem struct {
 	initiatedLogsFetch bool
 	loadingLogs        bool
 	loadingSteps       bool
-	steps              []*stepItem
-	spinner            spinner.Model
-	styles             styles
+	steps               []*stepItem
+	spinner             spinner.Model
+	styles              styles
+	lastSelectedStepIdx int
 }
 
 // Title implements charm.land/bubbles.list.DefaultItem.Title

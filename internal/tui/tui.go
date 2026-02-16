@@ -88,6 +88,7 @@ type model struct {
 	lastFetched       time.Time
 	helpOpen          bool
 	help              help.Model
+	logsScrollMode    bool
 }
 
 type ModelOpts struct {
@@ -540,16 +541,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if key.Matches(msg, nextPaneKey) {
-			m.focusedPane = m.nextPane()
-			m.zoomedPane = nil
-			m.setFocusedPaneStyles()
-		}
+		// Block all pane navigation while in logs scroll mode.
+		// User must Escape first to exit scroll mode.
+		if !m.logsScrollMode {
+			if key.Matches(msg, nextPaneKey) {
+				m.savePaneSelection()
+				m.focusedPane = m.nextPane()
+				m.zoomedPane = nil
+				m.setFocusedPaneStyles()
+			}
 
-		if key.Matches(msg, prevPaneKey) {
-			m.focusedPane = m.previousPane()
-			m.zoomedPane = nil
-			m.setFocusedPaneStyles()
+			if key.Matches(msg, prevPaneKey) {
+				m.savePaneSelection()
+				m.focusedPane = m.previousPane()
+				m.zoomedPane = nil
+				m.setFocusedPaneStyles()
+			}
 		}
 
 	case spinner.TickMsg:
@@ -634,6 +641,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateLists()...)
 		}
 	case PaneRuns:
+		// Save job selection for current run before potentially switching runs
+		m.savePaneSelection()
 		before := m.runsList.GlobalIndex()
 		m.runsList, cmd = m.runsList.Update(msg)
 		cmds = append(cmds, cmd)
@@ -643,6 +652,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateLists()...)
 		}
 	case PaneJobs:
+		// Save step selection for current job before potentially switching jobs
+		m.savePaneSelection()
 		before := m.jobsList.GlobalIndex()
 		m.jobsList, cmd = m.jobsList.Update(msg)
 		cmds = append(cmds, cmd)
@@ -661,6 +672,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PaneLogs:
 		if msg, ok := msg.(tea.KeyPressMsg); ok {
+			// Enter/Escape toggle scroll mode
+			if key.Matches(msg, enterScrollKey) && !m.logsScrollMode {
+				m.logsScrollMode = true
+				break
+			}
+			if key.Matches(msg, exitScrollKey) && m.logsScrollMode {
+				m.logsScrollMode = false
+				break
+			}
+
+			// These work regardless of scroll mode
 			if key.Matches(msg, gotoBottomKey) {
 				m.logsViewport.GotoBottom()
 			}
@@ -686,6 +708,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if ji != nil {
 					m.logsViewport.SetContentLines(ji.renderedLogs)
 				}
+			}
+
+			// Only forward key events to viewport when in scroll mode
+			if !m.logsScrollMode {
+				break
 			}
 		}
 		m.logsViewport, cmd = m.logsViewport.Update(msg)
@@ -1081,6 +1108,11 @@ func (m *model) viewLogs() string {
 	title := "Job Logs"
 	w := m.logsWidth()
 	if m.focusedPane == PaneLogs {
+		if m.logsScrollMode {
+			title = "Job Logs (scroll)"
+		} else {
+			title = "Job Logs · enter to scroll"
+		}
 		title = makePill(title, m.styles.focusedPaneTitleStyle, m.styles.colors.focusedColor)
 		s := m.styles.focusedPaneTitleBarStyle.MarginBottom(0)
 		title = s.Render(title)
@@ -1416,6 +1448,21 @@ func (m *model) getSelectedJobItem() *jobItem {
 	}
 }
 
+// savePaneSelection stores the current child-list selection on the parent item
+// so it can be restored when navigating back.
+func (m *model) savePaneSelection() {
+	switch m.focusedPane {
+	case PaneRuns:
+		if ri := m.getSelectedRunItem(); ri != nil {
+			ri.lastSelectedJobIdx = m.jobsList.GlobalIndex()
+		}
+	case PaneJobs:
+		if ji := m.getSelectedJobItem(); ji != nil {
+			ji.lastSelectedStepIdx = m.stepsList.GlobalIndex()
+		}
+	}
+}
+
 func (m *model) logsWidth() int {
 	if m.width == 0 {
 		return 0
@@ -1586,7 +1633,6 @@ func (m *model) onCheckChanged() []tea.Cmd {
 
 func (m *model) onRunChanged() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
-	m.jobsList.ResetSelected()
 	m.jobsList.ResetFilter()
 	newRun := m.runsList.SelectedItem()
 
@@ -1605,6 +1651,19 @@ func (m *model) onRunChanged() []tea.Cmd {
 	}
 
 	cmds = append(cmds, m.updateLists()...)
+
+	// Reset then restore saved job selection, clamped to the current list size.
+	// ResetSelected prevents the previous run's cursor from leaking.
+	m.jobsList.ResetSelected()
+	numJobs := len(m.jobsList.Items())
+	if numJobs > 0 && ri.lastSelectedJobIdx > 0 {
+		idx := ri.lastSelectedJobIdx
+		if idx >= numJobs {
+			idx = numJobs - 1
+		}
+		m.jobsList.Select(idx)
+	}
+
 	cmds = append(cmds, m.onJobChanged()...)
 
 	jobs := m.jobsList.Items()
@@ -1622,10 +1681,23 @@ func (m *model) onJobChanged() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	m.resetStepsState()
 	cmds = append(cmds, m.updateStepsList()...)
+
+	// Restore saved step selection, clamped to the current list size
+	currJob := m.getSelectedJobItem()
+	if currJob != nil {
+		numSteps := len(m.stepsList.Items())
+		if numSteps > 0 && currJob.lastSelectedStepIdx > 0 {
+			idx := currJob.lastSelectedStepIdx
+			if idx >= numSteps {
+				idx = numSteps - 1
+			}
+			m.stepsList.Select(idx)
+		}
+	}
+
 	cmds = append(cmds, m.tickSteps()...)
 	cmds = append(cmds, m.logsSpinner.Tick, m.inProgressSpinner.Tick)
 
-	currJob := m.getSelectedJobItem()
 	if currJob == nil {
 		// No job selected yet — expected when navigating to a run whose jobs
 		// are still loading (repo mode fetches jobs lazily per-run).

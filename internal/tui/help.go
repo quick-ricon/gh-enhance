@@ -32,6 +32,8 @@ func (km keyMap) FullHelp() [][]key.Binding {
 			refreshAllKey,
 		},
 		{
+			enterScrollKey,
+			exitScrollKey,
 			modeKey,
 			quitKey,
 			helpKey,

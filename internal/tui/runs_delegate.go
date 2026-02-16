@@ -17,11 +17,12 @@ import (
 )
 
 type runItem struct {
-	meta      itemMeta
-	run       *data.WorkflowRun
-	jobsItems []*jobItem
-	loading   bool
-	spinner   spinner.Model
+	meta               itemMeta
+	run                *data.WorkflowRun
+	jobsItems          []*jobItem
+	loading            bool
+	spinner            spinner.Model
+	lastSelectedJobIdx int
 }
 
 // Title implements /charm.land/bubbles.list.DefaultItem.Title

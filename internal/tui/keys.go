@@ -107,4 +107,14 @@ var (
 		key.WithKeys("?"),
 		key.WithHelp("?", "toggle help"),
 	)
+
+	enterScrollKey = key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "scroll logs"),
+	)
+
+	exitScrollKey = key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "exit scroll"),
+	)
 )
