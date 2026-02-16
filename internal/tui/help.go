@@ -17,7 +17,7 @@ func (km keyMap) FullHelp() [][]key.Binding {
 	if km.mode != ModeRepo {
 		lastGroup = append(lastGroup, modeKey)
 	}
-	lastGroup = append(lastGroup, quitKey, helpKey)
+	lastGroup = append(lastGroup, backKey, quitKey, helpKey)
 
 	return [][]key.Binding{
 		{
