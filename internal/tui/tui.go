@@ -445,10 +445,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(msg, applySearchKey) {
 				ji := m.getSelectedJobItem()
 				if ji != nil {
-					m.logsViewport.SetContentLines(ji.unstyledLogs)
+					start, end := m.getStepLogRange(ji)
+					filteredUnstyled := ji.unstyledLogs[start:end]
+					m.logsViewport.SetContentLines(filteredUnstyled)
 					highlights := regexp.MustCompile(
 						m.logsInput.Value()).FindAllStringIndex(
-						strings.Join(ji.unstyledLogs, "\n"), -1)
+						strings.Join(filteredUnstyled, "\n"), -1)
 					m.numHighlights = len(highlights)
 					m.logsViewport.SetHighlights(highlights)
 					m.logsViewport.HighlightNext()
@@ -704,10 +706,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logsInput.Reset()
 				m.numHighlights = 0
 				m.logsViewport.ClearHighlights()
-				ji := m.getSelectedJobItem()
-				if ji != nil {
-					m.logsViewport.SetContentLines(ji.renderedLogs)
-				}
+				m.setStepLogs()
 			}
 
 			// Only forward key events to viewport when in scroll mode
@@ -1711,26 +1710,85 @@ func (m *model) onJobChanged() []tea.Cmd {
 	return cmds
 }
 
-func (m *model) onStepChanged() {
-	ji := m.getSelectedJobItem()
+// getStepLogRange returns the start (inclusive) and end (exclusive) indices
+// of log lines belonging to the currently selected step.
+// Uses LogKindStepStart and LogKindJobCleanup markers as section boundaries,
+// then maps the selected step to the correct section by ordinal position
+// (skipping over steps that were skipped and produced no log output).
+func (m *model) getStepLogRange(ji *jobItem) (int, int) {
 	step := m.stepsList.SelectedItem()
-	cursor := m.stepsList.Cursor()
-
-	if ji == nil || step == nil {
-		return
+	if step == nil {
+		return 0, len(ji.logs)
 	}
 
-	if cursor == len(m.stepsList.Items())-1 {
-		m.logsViewport.GotoBottom()
-		return
+	si := step.(*stepItem)
+	if si.step.Conclusion == api.ConclusionSkipped {
+		return 0, 0
 	}
 
+	// Build section boundaries from log markers.
+	// Section 0 starts at index 0 ("Set up job").
+	// Each LogKindStepStart or LogKindJobCleanup marks a new section.
+	boundaries := []int{0}
 	for i, log := range ji.logs {
-		if log.Time.After(step.(*stepItem).step.StartedAt) {
-			m.logsViewport.SetYOffset(i - 1)
-			return
+		if log.Kind == data.LogKindStepStart || log.Kind == data.LogKindJobCleanup {
+			boundaries = append(boundaries, i)
 		}
 	}
+
+	// Map the selected step to its boundary index by counting
+	// non-skipped steps before it in the steps list.
+	// Use GlobalIndex() for absolute position (Cursor() is page-relative).
+	items := m.stepsList.Items()
+	globalIdx := m.stepsList.GlobalIndex()
+	boundaryIdx := 0
+	for i := 0; i < globalIdx; i++ {
+		s := items[i].(*stepItem)
+		if s.step.Conclusion != api.ConclusionSkipped {
+			boundaryIdx++
+		}
+	}
+
+	if boundaryIdx >= len(boundaries) {
+		return 0, 0
+	}
+
+	start := boundaries[boundaryIdx]
+	end := len(ji.logs)
+	if boundaryIdx+1 < len(boundaries) {
+		end = boundaries[boundaryIdx+1]
+	}
+
+	return start, end
+}
+
+// setStepLogs filters the viewport to show only the selected step's logs.
+func (m *model) setStepLogs() {
+	ji := m.getSelectedJobItem()
+	if ji == nil || len(ji.renderedLogs) == 0 {
+		return
+	}
+
+	start, end := m.getStepLogRange(ji)
+	if start >= end {
+		m.logsViewport.SetContent(
+			lipgloss.Place(
+				m.logsWidth(), m.logsViewport.Height(),
+				lipgloss.Center, lipgloss.Center,
+				m.styles.faintFgStyle.Bold(true).Render("No logs for this step")))
+		return
+	}
+	m.logsViewport.SetContentLines(ji.renderedLogs[start:end])
+}
+
+func (m *model) onStepChanged() {
+	ji := m.getSelectedJobItem()
+	if ji == nil || m.stepsList.SelectedItem() == nil {
+		return
+	}
+
+	m.setStepLogs()
+	m.logsViewport.GotoTop()
 }
 
 func (m *model) renderJobLogs() tea.Cmd {
@@ -1755,7 +1813,7 @@ func (m *model) renderJobLogs() tea.Cmd {
 	}
 
 	if len(ji.renderedLogs) != 0 {
-		m.logsViewport.SetContentLines(ji.renderedLogs)
+		m.setStepLogs()
 		m.setHeights()
 
 		return nil
@@ -1771,7 +1829,7 @@ func (m *model) renderJobLogs() tea.Cmd {
 	}
 
 	ji.renderedLogs, ji.unstyledLogs = m.renderLogs(ji)
-	m.logsViewport.SetContentLines(ji.renderedLogs)
+	m.setStepLogs()
 	m.setHeights()
 
 	return nil
@@ -1994,7 +2052,12 @@ func (m *model) goToErrorInLogs() {
 				break
 			}
 		}
-		m.logsViewport.SetYOffset(currJob.errorLine)
+		m.setStepLogs()
+		start, _ := m.getStepLogRange(currJob)
+		offset := currJob.errorLine - start
+		if offset > 0 {
+			m.logsViewport.SetYOffset(offset)
+		}
 	} else {
 		m.logsViewport.GotoTop()
 	}
