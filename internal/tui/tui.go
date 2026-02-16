@@ -972,19 +972,65 @@ func (m *model) viewPRName(width int, bgStyle lipgloss.Style) string {
 	return bgStyle.Width(width).Bold(true).Render(m.pr.Title)
 }
 
-func (m *model) viewFooter() string {
+func (m *model) renderFooterBar(totalText, statusView string, refreshing bool) string {
 	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
 	sFooter := m.styles.footerStyle.Width(m.width)
 
+	reFetchingIn := ""
+	if refreshing {
+		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
+		untilStr := fmt.Sprintf("in %ds", int(until))
+		if until <= 0 {
+			untilStr = "now..."
+		}
+		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("refreshing %s", untilStr))
+	}
+
+	helpView := m.styles.helpButtonStyle.Render("? help")
+
+	gap := bg.Render(
+		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(statusView)-
+			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
+			m.styles.footerStyle.GetHorizontalFrameSize())))
+
+	return sFooter.Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, totalText, statusView, gap, reFetchingIn, helpView))
+}
+
+func (m *model) footerStatusTexts(failing, inProgress, successful, skipped int) string {
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	texts := make([]string, 0)
+	if failing > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
+			fmt.Sprintf("%d failing", failing)))
+	}
+	if inProgress > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
+			fmt.Sprintf("%d in progress", inProgress)))
+	}
+	if successful > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
+			fmt.Sprintf("%d successful", successful)))
+	}
+	if skipped > 0 {
+		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
+			fmt.Sprintf("%d skipped", skipped)))
+	}
+	return bg.Render(strings.Join(texts, bg.Render(", ")))
+}
+
+func (m *model) viewFooter() string {
 	if m.mode == ModeRepo {
 		return m.viewRepoFooter()
 	}
 
+	bg := lipgloss.NewStyle().Background(m.styles.footerStyle.GetBackground())
+	sFooter := m.styles.footerStyle.Width(m.width)
+
 	if m.width == 0 || len(m.prWithChecks.Commits.Nodes) == 0 {
 		return sFooter.Inherit(bg).Render("")
 	}
-
-	texts := make([]string, 0)
 
 	contexts := m.prWithChecks.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts
 	total := contexts.CheckRunCount + contexts.StatusContextCount
@@ -995,45 +1041,10 @@ func (m *model) viewFooter() string {
 	}
 
 	stats := checks.AccumulatedStats(contexts.CheckRunCountsByState, contexts.StatusContextCountsByState)
+	statusView := m.footerStatusTexts(stats.Failed, stats.InProgress, stats.Succeeded, stats.Skipped)
+	refreshing := m.prWithChecks.Number != 0 && m.prWithChecks.IsStatusCheckInProgress()
 
-	if stats.Failed > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
-			fmt.Sprintf("%d failing", stats.Failed)))
-	}
-	if stats.InProgress > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
-			fmt.Sprintf("%d in progress", stats.InProgress)))
-	}
-	if stats.Succeeded > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
-			fmt.Sprintf("%d successful", stats.Succeeded)))
-	}
-	if stats.Skipped > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
-			fmt.Sprintf("%d skipped", stats.Skipped)))
-	}
-
-	checksView := bg.Render(strings.Join(texts, bg.Render(", ")))
-
-	reFetchingIn := ""
-	if m.prWithChecks.Number != 0 && m.prWithChecks.IsStatusCheckInProgress() {
-		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
-		untilStr := fmt.Sprintf("in %ds", int(until))
-		if until <= 0 {
-			untilStr = "now..."
-		}
-		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(fmt.Sprintf("refreshing %s", untilStr))
-	}
-
-	helpView := m.styles.helpButtonStyle.Render("? help")
-
-	gap := bg.Render(
-		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(checksView)-
-			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
-			m.styles.footerStyle.GetHorizontalFrameSize())))
-
-	return sFooter.Render(
-		lipgloss.JoinHorizontal(lipgloss.Top, totalText, checksView, gap, reFetchingIn, helpView))
+	return m.renderFooterBar(totalText, statusView, refreshing)
 }
 
 func (m *model) viewRepoFooter() string {
@@ -1065,46 +1076,9 @@ func (m *model) viewRepoFooter() string {
 			fmt.Sprintf("%d runs: ", total))
 	}
 
-	texts := make([]string, 0)
-	if failing > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.errorColor).Render(
-			fmt.Sprintf("%d failing", failing)))
-	}
-	if inProgress > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.warnColor).Render(
-			fmt.Sprintf("%d in progress", inProgress)))
-	}
-	if successful > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.successColor).Render(
-			fmt.Sprintf("%d successful", successful)))
-	}
-	if skipped > 0 {
-		texts = append(texts, bg.Foreground(m.styles.colors.faintColor).Render(
-			fmt.Sprintf("%d skipped", skipped)))
-	}
+	statusView := m.footerStatusTexts(failing, inProgress, successful, skipped)
 
-	runsView := bg.Render(strings.Join(texts, bg.Render(", ")))
-
-	reFetchingIn := ""
-	if m.hasInProgressRuns() {
-		until := time.Until(m.lastFetched.Add(refreshInterval)).Truncate(time.Second).Seconds()
-		untilStr := fmt.Sprintf("in %ds", int(until))
-		if until <= 0 {
-			untilStr = "now..."
-		}
-		reFetchingIn = bg.Padding(0, 1).Foreground(m.styles.colors.faintColor).Render(
-			fmt.Sprintf("refreshing %s", untilStr))
-	}
-
-	helpView := m.styles.helpButtonStyle.Render("? help")
-
-	gap := bg.Render(
-		strings.Repeat(" ", max(0, m.width-lipgloss.Width(totalText)-lipgloss.Width(runsView)-
-			lipgloss.Width(reFetchingIn)-lipgloss.Width(helpView)-
-			m.styles.footerStyle.GetHorizontalFrameSize())))
-
-	return sFooter.Render(
-		lipgloss.JoinHorizontal(lipgloss.Top, totalText, runsView, gap, reFetchingIn, helpView))
+	return m.renderFooterBar(totalText, statusView, m.hasInProgressRuns())
 }
 
 func (m *model) hasInProgressRuns() bool {
