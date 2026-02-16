@@ -50,6 +50,7 @@ type prChecksIntervalTickMsg struct {
 }
 
 var refreshInterval = time.Second * 10
+var idleRefreshInterval = time.Second * 30
 
 func (m *model) fetchPRChecksWithInterval() tea.Cmd {
 	return tea.Batch(
@@ -610,22 +611,23 @@ func (m *model) makeInitRepoCmd() tea.Cmd {
 }
 
 func (m *model) startFetchingRepoRunsWithInterval() tea.Cmd {
-	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
-		if !m.hasInProgressRuns() {
-			return nil
-		}
+	interval := idleRefreshInterval
+	if m.hasInProgressRuns() {
+		interval = refreshInterval
+	}
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return startIntervalFetching{}
 	})
 }
 
 func (m *model) fetchRepoRunsWithInterval() tea.Cmd {
+	interval := idleRefreshInterval
+	if m.hasInProgressRuns() {
+		interval = refreshInterval
+	}
 	return tea.Batch(
 		m.makeFetchRepoRunsCmd(),
-		tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
-			if !m.hasInProgressRuns() {
-				log.Info("no in-progress runs - not refetching anymore")
-				return nil
-			}
+		tea.Tick(interval, func(t time.Time) tea.Msg {
 			return startIntervalFetching{}
 		}),
 	)
