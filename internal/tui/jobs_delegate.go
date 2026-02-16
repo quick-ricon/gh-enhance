@@ -35,7 +35,7 @@ type jobItem struct {
 	steps               []*stepItem
 	spinner             spinner.Model
 	styles              styles
-	lastSelectedStepIdx int
+	lastSelectedStepNum int
 }
 
 // Title implements charm.land/bubbles.list.DefaultItem.Title

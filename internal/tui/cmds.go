@@ -82,7 +82,7 @@ func (m *model) startFetchingPRChecksWithInterval() tea.Cmd {
 }
 
 func (m *model) fetchPRChecks(prNumber string) tea.Msg {
-	log.Info("fetching pr checks from the begginging")
+	log.Info("fetching pr checks from the beginning")
 	return m.fetchPRChecksWithCursor(prNumber, "")
 }
 
@@ -606,7 +606,6 @@ func (m *model) makeInitRepoCmd() tea.Cmd {
 		m.jobsList.StartSpinner(),
 		m.logsSpinner.Tick,
 		m.makeFetchRepoRunsCmd(),
-		m.startFetchingRepoRunsWithInterval(),
 	)
 }
 

@@ -22,7 +22,7 @@ type runItem struct {
 	jobsItems          []*jobItem
 	loading            bool
 	spinner            spinner.Model
-	lastSelectedJobIdx int
+	lastSelectedJobId string
 }
 
 // Title implements /charm.land/bubbles.list.DefaultItem.Title
@@ -47,6 +47,10 @@ func (i *runItem) Description() string {
 		desc = fmt.Sprintf("on: %s", i.run.Event)
 	}
 
+	if i.run.Branch != "" {
+		desc += " · " + i.run.Branch
+	}
+
 	if dur := i.runDuration(); dur != "" {
 		desc += " · " + dur
 	}
@@ -63,6 +67,9 @@ func (i *runItem) runDuration() string {
 		d = i.run.UpdatedAt.Sub(i.run.StartedAt)
 	} else {
 		d = time.Since(i.run.StartedAt)
+	}
+	if d < 0 {
+		d = 0
 	}
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))

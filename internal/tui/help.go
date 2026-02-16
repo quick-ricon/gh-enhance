@@ -5,9 +5,20 @@ import (
 )
 
 // keyMap implements help.KeyMap
-type keyMap struct{}
+type keyMap struct {
+	mode ViewMode
+}
 
 func (km keyMap) FullHelp() [][]key.Binding {
+	lastGroup := []key.Binding{
+		enterScrollKey,
+		exitScrollKey,
+	}
+	if km.mode != ModeRepo {
+		lastGroup = append(lastGroup, modeKey)
+	}
+	lastGroup = append(lastGroup, quitKey, helpKey)
+
 	return [][]key.Binding{
 		{
 			nextRowKey,
@@ -31,13 +42,7 @@ func (km keyMap) FullHelp() [][]key.Binding {
 			openPRKey,
 			refreshAllKey,
 		},
-		{
-			enterScrollKey,
-			exitScrollKey,
-			modeKey,
-			quitKey,
-			helpKey,
-		},
+		lastGroup,
 	}
 }
 

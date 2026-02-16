@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -361,6 +362,10 @@ func FetchJobSteps(repo string, jobID string) (NormalizedJobStepsResponse, error
 		return res, err
 	}
 
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
 	raw := jobStepsResponse{}
 	err = json.Unmarshal(body, &raw)
 	if err != nil {
@@ -436,6 +441,7 @@ type RepoRunsFilter struct {
 	Status   string
 	Workflow string
 	PerPage  int
+	Page     int
 }
 
 type RestWorkflowRun struct {
@@ -496,6 +502,9 @@ func FetchRepoWorkflowRuns(repo string, filter RepoRunsFilter) (RestWorkflowRuns
 
 	q := runsUrl.Query()
 	q.Set("per_page", fmt.Sprintf("%d", perPage))
+	if filter.Page > 0 {
+		q.Set("page", fmt.Sprintf("%d", filter.Page))
+	}
 	if filter.Branch != "" {
 		q.Set("branch", filter.Branch)
 	}
@@ -523,6 +532,10 @@ func FetchRepoWorkflowRuns(repo string, filter RepoRunsFilter) (RestWorkflowRuns
 		return res, err
 	}
 
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+	}
+
 	err = json.Unmarshal(body, &res)
 	if err != nil {
 		log.Error("error parsing workflow runs response", "err", err)
@@ -535,6 +548,9 @@ func FetchRepoWorkflowRuns(repo string, filter RepoRunsFilter) (RestWorkflowRuns
 // FetchWorkflowRunJobs lists jobs for a specific workflow run via the REST API.
 func FetchWorkflowRunJobs(repo string, runID string) (RestWorkflowJobsResponse, error) {
 	res := RestWorkflowJobsResponse{}
+	if _, err := strconv.Atoi(runID); err != nil {
+		return res, fmt.Errorf("invalid run ID %q: must be numeric", runID)
+	}
 	c, err := getHTTPClient()
 	if err != nil {
 		return res, err
@@ -556,6 +572,10 @@ func FetchWorkflowRunJobs(repo string, runID string) (RestWorkflowJobsResponse, 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return res, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return res, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	err = json.Unmarshal(body, &res)

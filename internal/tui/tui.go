@@ -86,9 +86,10 @@ type model struct {
 	version           string
 	rateLimit         api.RateLimit
 	lastFetched       time.Time
-	helpOpen          bool
-	help              help.Model
-	logsScrollMode    bool
+	helpOpen           bool
+	help               help.Model
+	logsScrollMode     bool
+	repoRefreshStarted bool
 }
 
 type ModelOpts struct {
@@ -218,6 +219,7 @@ func NewModel(repo string, number string, opts ModelOpts) model {
 		focusedPane:       focusedPane,
 		lastFetched:       time.Now(),
 	}
+	keys.mode = opts.Mode
 	m.help.SetKeys(keys.FullHelp())
 	m.setFocusedPaneStyles()
 	return m
@@ -323,6 +325,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastFetched = time.Now()
 		m.stopSpinners()
 		cmds = append(cmds, m.onWorkflowRunsFetched()...)
+		// Start the refresh interval after the initial fetch completes, so
+		// hasInProgressRuns() sees actual data instead of an empty slice.
+		if !m.repoRefreshStarted {
+			m.repoRefreshStarted = true
+			cmds = append(cmds, m.startFetchingRepoRunsWithInterval())
+		}
 
 	case repoRunJobsFetchedMsg:
 		if msg.err != nil {
@@ -1475,11 +1483,18 @@ func (m *model) savePaneSelection() {
 	switch m.focusedPane {
 	case PaneRuns:
 		if ri := m.getSelectedRunItem(); ri != nil {
-			ri.lastSelectedJobIdx = m.jobsList.GlobalIndex()
+			if ji := m.getSelectedJobItem(); ji != nil {
+				ri.lastSelectedJobId = ji.job.Id
+			}
 		}
 	case PaneJobs:
 		if ji := m.getSelectedJobItem(); ji != nil {
-			ji.lastSelectedStepIdx = m.stepsList.GlobalIndex()
+			si := m.stepsList.SelectedItem()
+			if si != nil {
+				if step, ok := si.(*stepItem); ok {
+					ji.lastSelectedStepNum = step.step.Number
+				}
+			}
 		}
 	}
 }
@@ -1673,16 +1688,16 @@ func (m *model) onRunChanged() []tea.Cmd {
 
 	cmds = append(cmds, m.updateLists()...)
 
-	// Reset then restore saved job selection, clamped to the current list size.
+	// Reset then restore saved job selection by ID.
 	// ResetSelected prevents the previous run's cursor from leaking.
 	m.jobsList.ResetSelected()
-	numJobs := len(m.jobsList.Items())
-	if numJobs > 0 && ri.lastSelectedJobIdx > 0 {
-		idx := ri.lastSelectedJobIdx
-		if idx >= numJobs {
-			idx = numJobs - 1
+	if ri.lastSelectedJobId != "" {
+		for i, item := range m.jobsList.Items() {
+			if ji, ok := item.(*jobItem); ok && ji.job.Id == ri.lastSelectedJobId {
+				m.jobsList.Select(i)
+				break
+			}
 		}
-		m.jobsList.Select(idx)
 	}
 
 	cmds = append(cmds, m.onJobChanged()...)
@@ -1703,16 +1718,14 @@ func (m *model) onJobChanged() []tea.Cmd {
 	m.resetStepsState()
 	cmds = append(cmds, m.updateStepsList()...)
 
-	// Restore saved step selection, clamped to the current list size
+	// Restore saved step selection by step number
 	currJob := m.getSelectedJobItem()
-	if currJob != nil {
-		numSteps := len(m.stepsList.Items())
-		if numSteps > 0 && currJob.lastSelectedStepIdx > 0 {
-			idx := currJob.lastSelectedStepIdx
-			if idx >= numSteps {
-				idx = numSteps - 1
+	if currJob != nil && currJob.lastSelectedStepNum > 0 {
+		for i, item := range m.stepsList.Items() {
+			if si, ok := item.(*stepItem); ok && si.step.Number == currJob.lastSelectedStepNum {
+				m.stepsList.Select(i)
+				break
 			}
-			m.stepsList.Select(idx)
 		}
 	}
 
@@ -2203,7 +2216,7 @@ func (m *model) onWorkflowRunsFetched() []tea.Cmd {
 			before = selectedRun.(*runItem)
 		}
 
-		cmds = append(cmds, m.buildHierachicalChecksLists()...)
+		cmds = append(cmds, m.buildHierarchicalChecksLists()...)
 
 		// Restore run selection by ID after list rebuild (InsertItem can shift cursor).
 		if before != nil {
@@ -2218,7 +2231,10 @@ func (m *model) onWorkflowRunsFetched() []tea.Cmd {
 		if len(m.runsList.Items()) > 0 {
 			ri := m.runsList.SelectedItem().(*runItem)
 			if m.mode == ModeRepo {
-				cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+				// Only fetch jobs if we don't have them yet or the run is still in progress.
+				if ri.loading || ri.IsInProgress() || len(ri.jobsItems) == 0 {
+					cmds = append(cmds, m.makeFetchRepoRunJobsCmd(ri.run.Id))
+				}
 			} else {
 				cmds = append(cmds, m.makeFetchWorkflowRunStepsCmd(ri.run.Id))
 			}
@@ -2270,7 +2286,7 @@ func (m *model) buildFlatChecksLists() []tea.Cmd {
 	return cmds
 }
 
-func (m *model) buildHierachicalChecksLists() []tea.Cmd {
+func (m *model) buildHierarchicalChecksLists() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0)
 	for i, run := range m.workflowRuns {
 		ri := m.getRunItemById(run.Id)
